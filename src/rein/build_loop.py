@@ -666,6 +666,8 @@ def _begin_attempt(entry: Mapping[str, Any]) -> dict[str, Any]:
     if previous:
         kept["previous"] = previous
     return {**entry, "handoff": kept}
+
+
 #
 # The implementer's own agent session is process-local and dies with the terminal that ran it, so
 # what a build restarted from another terminal inherits has to be written down: which gate step
@@ -2687,7 +2689,7 @@ class Orchestrator:
             # One analysis of one whole diff answers all three: the floor the gate will key on,
             # whether the gate will compose at all, and which readings it will take.
             graph = self._load_graph()
-            with file_readers.opened(self.repo, self.config.raw, head) as declared:
+            with file_readers.opened(self.repo, self.config.raw, head, run=True) as declared:
                 readings, risk_floor, effective = review_reading.change_readings(
                     self.repo,
                     self._plan,
@@ -2699,33 +2701,36 @@ class Orchestrator:
                     ceiling=int(limits["max_diff_bytes"]),
                     file_readers=declared,
                 )
-            if models.risk_at_least(effective, "critical"):
-                self._warming_off = True
-                print(
-                    f"    [review] {task.id}: the change is {effective} — acceptance reads it whole, "
-                    "so no reading is warmed from here on"
-                )
-                return []
-            landed = {t.id for t in graph.tasks if t.status in _LANDED_STATUSES}
-            due = [r for r in readings if task.id in r.members and set(r.members) <= landed]
-            return [
-                review_reading.warm(
-                    self.repo,
-                    review_transport.StagedReviewers(self.repo, config=self.config.raw, readings=self.config.readings),
-                    reading=reading,
-                    base=base,
-                    head=head,
-                    exclude=exclude,
-                    limits=limits,
-                    evidence=self._plan.artifact_paths if self._plan is not None else (),
-                    risk_floor=risk_floor,
-                    host_surface=review_reading.host_surface_digest(self.repo, head),
-                    config=self.config.raw,
-                    cache=review_cache.StageCache(self.repo.root),
-                    readings=self.config.readings,
-                )
-                for reading in due
-            ]
+                if models.risk_at_least(effective, "critical"):
+                    self._warming_off = True
+                    print(
+                        f"    [review] {task.id}: the change is {effective} — acceptance reads it whole, "
+                        "so no reading is warmed from here on"
+                    )
+                    return []
+                landed = {t.id for t in graph.tasks if t.status in _LANDED_STATUSES}
+                due = [r for r in readings if task.id in r.members and set(r.members) <= landed]
+                return [
+                    review_reading.warm(
+                        self.repo,
+                        review_transport.StagedReviewers(
+                            self.repo, config=self.config.raw, readings=self.config.readings
+                        ),
+                        reading=reading,
+                        base=base,
+                        head=head,
+                        exclude=exclude,
+                        limits=limits,
+                        evidence=self._plan.artifact_paths if self._plan is not None else (),
+                        file_readers=declared,
+                        risk_floor=risk_floor,
+                        host_surface=review_reading.host_surface_digest(self.repo, head),
+                        config=self.config.raw,
+                        cache=review_cache.StageCache(self.repo.root),
+                        readings=self.config.readings,
+                    )
+                    for reading in due
+                ]
         except (
             review_policy.ReviewPolicyError,
             review_transport.TransportError,
@@ -4775,7 +4780,7 @@ class Orchestrator:
             return
         from rein import review as review_mod
 
-        view = review_mod.outlook(self.repo)
+        view = review_mod.outlook(self.repo, run_readers=True)
         if view is None:
             return
         if view.over_budget:

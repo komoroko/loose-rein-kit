@@ -259,6 +259,9 @@ class ChangeOutlook:
     #: read whole, and then `readings` is 1 — the shape every outlook had before composition.
     unit: str = review_reading.WHOLE
     readings: int = 1
+    #: Files a declared reader claims and has not read yet (`outlook(run_readers=False)`): neither
+    #: read nor unread, so neither counted in `unreadable` nor in `coverage_status`, and named on their own.
+    unasked: tuple[str, ...] = ()
 
     @property
     def over_budget(self) -> bool:
@@ -293,6 +296,8 @@ class ChangeOutlook:
         if self.unreadable:
             verdict = "blocks acceptance" if self.coverage_blocks_gate else "recorded, not blocking below high risk"
             text += f"; {len(self.unreadable)} unreadable file(s) make coverage insufficient ({verdict})"
+        if self.unasked:
+            text += f"; {len(self.unasked)} file(s) not yet read by their file reader (`rein doctor` reads them)"
         return text
 
     def made_of(self) -> str:
@@ -317,11 +322,15 @@ class ChangeOutlook:
         return "made of: " + ", ".join(parts)
 
 
-def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | None:
+def outlook(repo: repo_mod.Repo, *, run_readers: bool, base: str | None = None) -> ChangeOutlook | None:
     """What acceptance would be asked to read, right now. None when the repo cannot answer yet.
 
-    Cheap enough to run from `status`: **one** `git diff` and the deterministic analysis, no
-    launches. The readings are derived from the plan and attributed out of that one diff
+    Cheap enough to run from `status` with `run_readers=False`: **one** `git diff` and the
+    deterministic analysis, no launches, and no file reader started — a file one claims is read
+    from what the evidence ledger already knows, and otherwise named as not read yet (`unasked`).
+    `doctor` and the build run them, so their answer is the review's.
+
+    The readings are derived from the plan and attributed out of that one diff
     (`review_reading.bytes_by_reading`) rather than each taking a `git diff` of its own — this is
     read on every stream tick, and eighteen `git diff` calls on a WSL mount is the cost the
     fingerprint exists to avoid.
@@ -338,13 +347,10 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
     except ReviewError:
         return None
     head = repo._git_rc("rev-parse", "HEAD")[1].strip()
-    try:
-        with file_readers.opened(repo, config, head) as declared:
-            facts = diff_facts.analyze(
-                diff_text, file_readers=declared, evidence=plan.artifact_paths if plan is not None else ()
-            )
-    except common.ReinError:
-        return None  # the same answer as a config it cannot read at all, above
+    with file_readers.opened(repo, config, head, run=run_readers) as declared:
+        facts = diff_facts.analyze(
+            diff_text, file_readers=declared, evidence=plan.artifact_paths if plan is not None else ()
+        )
     limits = {**human_review.DEFAULT_BUDGET, **(config.budgets if config is not None else {})}
     unreadable = [
         str(entry.get("path", "")) for entry in (*facts.coverage.unsupported_files, *facts.coverage.generated_files)
@@ -377,6 +383,7 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
         total_bytes=len(sent.encode("utf-8")),
         ceiling=int(limits["max_diff_bytes"]),
         unreadable=tuple(sorted(p for p in unreadable if p)),
+        unasked=tuple(sorted(u["path"] for u in facts.coverage.unasked_files)),
         coverage_status=facts.coverage.coverage_status,
         effective_risk=effective,
         composition=tuple(bytes_by_kind(sent).items()),
@@ -533,56 +540,64 @@ def generate(
         # split the scope — is not a move that exists at acceptance.
         whole_diff = review_reading.diff_of(repo, trusted_base, head, exclude)
         evidence = plan.artifact_paths if plan is not None else ()
-        with file_readers.opened(repo, config, head) as declared:
+        with file_readers.opened(repo, config, head, run=True) as declared:
             facts = diff_facts.analyze(whole_diff, file_readers=declared, evidence=evidence)
-        effective = review_reading.effective_risk(facts, plan)
-        changed = [f.path for f in facts.files]
+            effective = review_reading.effective_risk(facts, plan)
+            changed = [f.path for f in facts.files]
 
-        # What the last review found blocking *about this same base*. Taken from the copy read at
-        # the top rather than re-read here, and before the calls below, which are about to move off
-        # this thread — the store is not something to touch from two. It is needed this early
-        # because it decides how the change may be read at all: see the re-take below.
-        prior_blocking = _prior_blocking(repo, existing, trusted_base, state)
+            # What the last review found blocking *about this same base*. Taken from the copy read at
+            # the top rather than re-read here, and before the calls below, which are about to move off
+            # this thread — the store is not something to touch from two. It is needed this early
+            # because it decides how the change may be read at all: see the re-take below.
+            prior_blocking = _prior_blocking(repo, existing, trusted_base, state)
 
-        # How the change is read: one reading of everything, or one per dependency chain the plan
-        # scopes (task by task where a chain is too big for one launch) plus the seam between them.
-        # Each is measured and widened on its own, so one launch holds one chain's slice rather than
-        # a whole cycle, and a slice nobody read is named rather than counted as read
-        # (`compose_coverage`).
-        sent, _ = review_reading.fold_bodies(
-            whole_diff, facts.files, signalled=frozenset(hit.path for hit in facts.signals)
-        )
-        readings = review_reading.plan_readings(
-            _effective_tasks(plan, state),
-            changed,
-            mode=config.composition if config is not None else "auto",
-            risk=effective,
-            sent=sent,
-            ceiling=int(limits["max_diff_bytes"]),
-        )
-        measures = review_reading.take_readings(
-            repo, readings, base=trusted_base, head=head, exclude=exclude, limits=limits, evidence=evidence
-        )
-        # A composition is a way of reading *this* change only if every finding carried into it
-        # lands on a reading that can see the code it names. One that does not is not a finding to
-        # be assigned somewhere anyway — the reviewer that got it could neither re-state nor
-        # resolve it, and the refusal for dropping a carried finding is not passable from there.
-        # Asked after the empty slices are dropped, because a dropped reading owns nothing.
-        if orphaned := review_reading.unowned_priors([m.reading for m in measures], prior_blocking):
-            logger.warning(
-                f"carried blocking finding(s) {', '.join(orphaned)} are anchored in code no task "
-                "scope covers, so no slice of this change can answer for them — reading the change "
-                "whole instead of composing it"
+            # How the change is read: one reading of everything, or one per dependency chain the plan
+            # scopes (task by task where a chain is too big for one launch) plus the seam between them.
+            # Each is measured and widened on its own, so one launch holds one chain's slice rather than
+            # a whole cycle, and a slice nobody read is named rather than counted as read
+            # (`compose_coverage`).
+            sent, _ = review_reading.fold_bodies(
+                whole_diff, facts.files, signalled=frozenset(hit.path for hit in facts.signals)
+            )
+            readings = review_reading.plan_readings(
+                _effective_tasks(plan, state),
+                changed,
+                mode=config.composition if config is not None else "auto",
+                risk=effective,
+                sent=sent,
+                ceiling=int(limits["max_diff_bytes"]),
             )
             measures = review_reading.take_readings(
                 repo,
-                [review_reading.WHOLE_READING],
+                readings,
                 base=trusted_base,
                 head=head,
                 exclude=exclude,
                 limits=limits,
                 evidence=evidence,
+                file_readers=declared,
             )
+            # A composition is a way of reading *this* change only if every finding carried into it
+            # lands on a reading that can see the code it names. One that does not is not a finding to
+            # be assigned somewhere anyway — the reviewer that got it could neither re-state nor
+            # resolve it, and the refusal for dropping a carried finding is not passable from there.
+            # Asked after the empty slices are dropped, because a dropped reading owns nothing.
+            if orphaned := review_reading.unowned_priors([m.reading for m in measures], prior_blocking):
+                logger.warning(
+                    f"carried blocking finding(s) {', '.join(orphaned)} are anchored in code no task "
+                    "scope covers, so no slice of this change can answer for them — reading the change "
+                    "whole instead of composing it"
+                )
+                measures = review_reading.take_readings(
+                    repo,
+                    [review_reading.WHOLE_READING],
+                    base=trusted_base,
+                    head=head,
+                    exclude=exclude,
+                    limits=limits,
+                    evidence=evidence,
+                    file_readers=declared,
+                )
         # **Highest-risk reading first.** Every reading is taken either way and none is priced
         # differently for it — what the order decides is which answers exist when a run does not
         # finish. A session limit, a capacity refusal or a Ctrl-C leaves the cache holding whatever

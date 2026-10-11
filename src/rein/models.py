@@ -2111,10 +2111,38 @@ class Config:
     @classmethod
     def parse(cls, text: str, *, what: str = "config.yaml") -> Config:
         document = strict_yaml.load_mapping(text, what=what)
-        errors = schema_errors(document, "config")
+        errors = schema_errors(document, "config") or cls(document).problems()
         if errors:
             raise DocumentError(what, errors)
         return cls(document)
+
+    def problems(self) -> list[str]:
+        """What the schema cannot say about a config it accepts. Empty when there is nothing.
+
+        A file reader is handed a file the change wrote, so it runs where nothing else of the
+        repository is: an `oci` profile, with only that file mounted (`file_readers`). On the host,
+        or in an agent sandbox with egress, the bytes the change chose would meet a parser outside
+        the boundary the quality gate's own commands are held to. Refused here, at the mandate that
+        freezes the file, rather than when acceptance first asks a reader.
+        """
+        readers = self.file_readers
+        if not readers:
+            return []
+        problems: list[str] = []
+        names = [reader.name for reader in readers]
+        if repeated := sorted({name for name in names if names.count(name) > 1}):
+            problems.append(
+                f"review_policy.file_readers names {', '.join(repeated)} more than once: the manifest "
+                "records each reader by name beside the files it read, so one name must be one command"
+            )
+        profile = self.quality_gate_profile
+        if profile is None or not profile.is_sandboxed:
+            where = "names no profile" if profile is None else f"is {profile.name!r}, of kind {profile.kind!r}"
+            problems.append(
+                f"review_policy.file_readers is declared, and executors.quality_gate_profile {where}: "
+                "a file reader runs only in an `oci` profile, with nothing but the file mounted"
+            )
+        return problems
 
     def frozen_digest(self) -> str:
         """The part of config.yaml the mandate's approval covers: everything but the image pins and

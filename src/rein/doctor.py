@@ -1762,7 +1762,7 @@ def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
     """
     from rein import review as review_mod
 
-    view = review_mod.outlook(repo)
+    view = review_mod.outlook(repo, run_readers=True)
     if view is None:
         return [Finding("INFO", "review", "no reviewable change yet (no base commit, or the SSOT is unreadable)")]
     findings: list[Finding] = []

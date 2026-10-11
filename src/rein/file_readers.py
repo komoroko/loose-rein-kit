@@ -8,12 +8,14 @@ be — and exempting by location instead (a declared directory) is the hole #79 
 either: a critical unknown is not something a person may accept as a risk (`models.DISPOSITION_VALUES`).
 
 So the gap is closed by **reading**, with the reader named. A reader is a deterministic command the
-mandate froze in `config.yaml`. It runs in `quality_gate_profile` with nothing of the repository
-mounted, given only the one file, and it either accounts for the whole of it as the kind of file it
-reads (exit 0) or refuses it. The manifest names it beside every file it read, with the digest of
-its command and image.
+mandate froze in `config.yaml`. It runs in `quality_gate_profile`, which must be an `oci` sandbox,
+with nothing mounted but the one file, and it either accounts for the whole of it as the kind of
+file it reads (exit 0) or refuses it. The manifest names it beside every file it read, with the
+digest of its command and image.
 
-The command is never a path inside the repository: the change under review could rewrite it.
+Contained, because the file is the change's: a parser on the host would be handed bytes the change
+chose, and a command naming a script in the repository would run whatever the change made of it.
+Nothing of the repository exists inside the container, so neither has anything to reach.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from rein import digests, evidence, executors, models
@@ -44,6 +46,13 @@ class CommandReader:
     repo: repo_mod.Repo
     head: str
     ledger: evidence.Ledger
+    #: False for a forecast (`review.outlook`): a reader is asked only what the ledger already
+    #: knows, and a status read never starts a container.
+    run: bool
+    #: Each blob's verdict in this scope. One review asks about one file once for the whole change
+    #: and again for every reading that holds it; a refusal is not cached across runs (a machine's
+    #: bad afternoon is not a verdict), and asking it again inside one is a container per reading.
+    _verdicts: dict[str, str | None] = field(default_factory=dict, repr=False)
 
     @property
     def name(self) -> str:
@@ -51,35 +60,38 @@ class CommandReader:
 
     @property
     def digest(self) -> str:
-        """Its command and where it runs: the same reader in another image is another reader."""
-        where = self.profile.image if self.profile.runs_contained else "host"
-        return digests.of({"command": list(self.spec.command), "image": where})
+        """Its command and the image it runs in: the same command in another image is another reader."""
+        return digests.of({"command": list(self.spec.command), "image": self.profile.image})
 
     def claims(self, path: str) -> bool:
         return self.spec.claims(path)
 
-    def read(self, path: str) -> str:
-        """ "" when the reader accounted for the file at `head`; otherwise why not.
+    def read(self, path: str) -> str | None:
+        """ "" when the reader accounted for the file at `head`, why not when it refused it, and None
+        when this scope does not run readers and the ledger has no answer.
 
         A blob it has read before is not read again (`evidence.Ledger`, keyed by the blob and the
-        reader's digest): only an acceptance is recorded, so a refusal is always asked afresh.
+        reader's digest): only an acceptance is recorded, so a refusal is asked afresh by the next
+        scope that runs readers.
         """
-        inside = [arg for arg in self.spec.command if _inside(arg, self.repo.root)]
-        if inside:
-            return f"its command names {inside[0]}, inside the repository the change under review can rewrite"
         blob = _git(self.repo, "rev-parse", f"{self.head}:{path}").decode().strip()
+        if blob not in self._verdicts:
+            self._verdicts[blob] = self._verdict(blob, PurePosixPath(path).name)
+        return self._verdicts[blob]
+
+    def _verdict(self, blob: str, name: str) -> str | None:
         tool = (self.name, self.digest)
         if self.ledger.hit(evidence.KIND_READER, blob, tool):
             return ""
-        name = PurePosixPath(path).name
+        if not self.run:
+            return None
         with tempfile.TemporaryDirectory(prefix="rein-reader-") as scratch:
             (Path(scratch) / name).write_bytes(_git(self.repo, "cat-file", "blob", blob))
-            contained = self.profile.runs_contained
             spec = executors.ExecutionSpec(
-                command=(*self.spec.command, f"/input/{name}" if contained else str(Path(scratch) / name)),
+                command=(*self.spec.command, f"/input/{name}"),
                 profile=self.profile,
-                mounts=((Path(scratch), "/input", "ro"),) if contained else (),
-                workdir="/input" if contained else scratch,
+                mounts=((Path(scratch), "/input", "ro"),),
+                workdir="/input",
                 timeout_sec=TIMEOUT_SEC,
             )
             try:
@@ -94,42 +106,29 @@ class CommandReader:
 
 
 @contextmanager
-def opened(repo: repo_mod.Repo, config: models.Config | None, head: str) -> Iterator[Sequence[CommandReader]]:
+def opened(
+    repo: repo_mod.Repo, config: models.Config | None, head: str, *, run: bool
+) -> Iterator[Sequence[CommandReader]]:
     """The readers `config` declares, bound to `head`; the ledger is written back on the way out.
 
-    None when nothing is declared. A declared reader with no `quality_gate_profile` to run in is a
-    config error and raised as one: reading on the host instead would put a file the change wrote in
-    front of a parser outside the sandbox, and saying nothing about it.
+    `run` is whether a reader the ledger has no answer for is run here or left unasked. Everything
+    that writes a verdict runs them (the review, the build's warm readings, `doctor`); the board,
+    read on every stream tick, does not.
+
+    `Config.parse` refuses a declared reader with no `oci` profile to run in, so one reaching here
+    is a config that never went through it, and is refused the same way.
     """
-    specs = config.file_readers if config is not None else ()
-    if not specs:
+    if config is None or not config.file_readers:
         yield ()
         return
-    profile = config.quality_gate_profile if config is not None else None
-    if profile is None:
-        raise models.DocumentError(
-            "config.yaml",
-            [
-                "review_policy.file_readers is declared, and executors.quality_gate_profile names "
-                "no profile to run them in"
-            ],
-        )
+    profile = config.quality_gate_profile
+    if profile is None or not profile.is_sandboxed:
+        raise models.DocumentError("config.yaml", config.problems())
     ledger = evidence.Ledger.for_repo(repo, enabled=evidence.cache_enabled_by_env())
     try:
-        yield tuple(CommandReader(spec, profile, repo, head, ledger) for spec in specs)
+        yield tuple(CommandReader(spec, profile, repo, head, ledger, run) for spec in config.file_readers)
     finally:
         ledger.flush()
-
-
-def _inside(arg: str, root: Path) -> bool:
-    candidate = Path(arg)
-    if not candidate.is_absolute():
-        return False
-    try:
-        candidate.resolve().relative_to(root.resolve())
-    except ValueError:
-        return False
-    return True
 
 
 def _git(repo: repo_mod.Repo, *args: str) -> bytes:

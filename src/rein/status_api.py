@@ -1152,7 +1152,8 @@ def collect_status(
     if stage == "building" and not template_mode:
         from rein import review as review_mod
 
-        view = review_mod.outlook(repo)
+        # No reader is started from here: the dashboard polls this (`review.outlook`).
+        view = review_mod.outlook(repo, run_readers=False)
         if view is not None:
             outlook = {
                 "line": view.line(),
@@ -1163,6 +1164,7 @@ def collect_status(
                 "ceiling": view.ceiling,
                 "over_budget": view.over_budget,
                 "unreadable": list(view.unreadable),
+                "unasked": list(view.unasked),
                 "coverage_blocks_gate": view.coverage_blocks_gate,
                 "made_of": view.made_of(),
                 "composition": dict(view.composition),

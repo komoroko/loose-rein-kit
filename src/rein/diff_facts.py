@@ -440,8 +440,9 @@ class FileReader(Protocol):
         """Is `path` one of the files this reader reads?"""
         ...
 
-    def read(self, path: str) -> str:
-        """ "" when it accounted for the whole file; otherwise why not, for the manifest."""
+    def read(self, path: str) -> str | None:
+        """ "" when it accounted for the whole file; why not, for the manifest, when it refused it;
+        None when it was not asked here (a forecast that runs nothing, `file_readers.opened`)."""
         ...
 
 
@@ -507,9 +508,21 @@ class CoverageManifest:
     #: Unreadable files the frozen plan declares as an `artifact` criterion's evidence. Named, and
     #: not a gap: nothing was meant to read them as code (`build_coverage`).
     evidence_files: tuple[dict[str, str], ...] = ()
+    #: Files a reader claims and was not asked about, each with its name: a forecast's only. Left
+    #: out of the status, which a forecast cannot know for them, and never part of a manifest.
+    unasked_files: tuple[dict[str, str], ...] = ()
 
     def to_manifest(self) -> dict[str, object]:
-        """The `coverage[]` entry for review.machine — only the schema's fields, no extras."""
+        """The `coverage[]` entry for review.machine — only the schema's fields, no extras.
+
+        Refused for a manifest with an unasked file: it would record as settled a file nobody read
+        or refused.
+        """
+        if self.unasked_files:
+            raise ValueError(
+                f"a coverage manifest is written only after every reader is asked; "
+                f"{', '.join(u['path'] for u in self.unasked_files)} were not"
+            )
         entry: dict[str, object] = {
             "diff_digest": self.diff_digest,
             "analyzed_files": self.analyzed_files,
@@ -595,7 +608,7 @@ def build_coverage(
     `file_readers` are asked about every other file nothing here can read, binary or text, and the
     first that claims a file answers for it (`FileReader`). A file one reads goes to `read_files` with
     its name; one it refuses, or one no reader claims, stays in `unsupported_files`, and the detail
-    says which reader refused it and why.
+    says which reader refused it and why. One it was not asked about goes to `unasked_files`.
     """
     diff_digest = digests.of_bytes(diff_text.encode("utf-8"))
     analyzed = 0
@@ -606,6 +619,7 @@ def build_coverage(
     generated: list[dict[str, str]] = []
     languages: dict[str, str] = {}
     read: list[dict[str, str]] = []
+    unasked: list[dict[str, str]] = []
     used_readers: dict[str, str] = {}
     has_binary = False
 
@@ -635,11 +649,15 @@ def build_coverage(
         # decoded — git marks a file it could not decode as binary, and that has none.
         language_method = None if file.binary else _analysis_for(file.path, "\n".join(file.changed_lines))
         if language_method is None:
-            reader, refused = _ask_readers(file_readers, file.path)
-            if reader is not None:
+            reader, verdict = _ask_readers(file_readers, file.path)
+            if reader is not None and verdict == "":
                 read.append({"path": file.path, "reader": reader.name})
                 used_readers[reader.name] = reader.digest
                 continue
+            if reader is not None and verdict is None:
+                unasked.append({"path": file.path, "reader": reader.name})
+                continue
+            refused = f"reader {reader.name} refused it: {verdict}" if reader is not None else ""
             if file.path in named:
                 has_binary = has_binary or file.binary
                 declared.append({"path": file.path})
@@ -666,6 +684,7 @@ def build_coverage(
         file_readers=used_readers,
         read_files=tuple(read),
         evidence_files=tuple(declared),
+        unasked_files=tuple(unasked),
     )
     # Status is decided against the effective risk by review_policy; a manifest on its own
     # reports the raw facts and a conservative default.
@@ -714,18 +733,16 @@ def _default_status(manifest: CoverageManifest) -> str:
     return "sufficient"
 
 
-def _ask_readers(readers: Sequence[FileReader], path: str) -> tuple[FileReader | None, str]:
-    """`(the reader that read path, "")`, or `(None, why the one that claimed it refused)`.
+def _ask_readers(readers: Sequence[FileReader], path: str) -> tuple[FileReader | None, str | None]:
+    """`(the reader that claims path, its verdict)` (`FileReader.read`); `(None, "")` when none does.
 
     The first reader that claims the file is the one asked, and its refusal is the answer: a second
     reader that would accept what the first one refused is a reader for a different kind of file,
     and trying readers until one says yes is shopping for a verdict.
     """
     for reader in readers:
-        if not reader.claims(path):
-            continue
-        refused = reader.read(path)
-        return (None, f"reader {reader.name} refused it: {refused}") if refused else (reader, "")
+        if reader.claims(path):
+            return reader, reader.read(path)
     return None, ""
 
 

@@ -572,6 +572,7 @@ def test_a_slice_holding_no_signal_is_not_where_the_risk_floor_drops(tmp_path: P
         exclude=review_reading.not_the_product(repo, None),
         mode="auto",
         ceiling=0,
+        file_readers=(),
     )
     assert whole == "high", "the change as a whole crosses a security boundary"
     assert floors == [whole] * 3, floors
