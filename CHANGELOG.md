@@ -4,6 +4,34 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.13.1] - 2026-10-11
+
+**A patch release: the format stays `rein-grounded-v11`.** Five issues filed from one recorded
+cycle on 0.13.0, each fixed where it starts. Nothing to do on upgrade beyond `rein sync`.
+
+- **`rein build --supervise` waits for the reset the refusal named (#104).** The fix for #27
+  reached `rein review generate --supervise` only; the build's supervisor slept a fixed interval
+  because the run that returned `3` handed it nothing but the code. One recorded cycle made 51
+  refused launches. Both supervisors now use one delay, `faults.supervise_delay`.
+- **A report kept across a reset is never read as the next attempt's own (#105).** `rein task
+  reset` without `--fresh` keeps the handoff, and an attempt that ended without `rein report`
+  re-raised the previous attempt's `needs-revision` byte for byte, against a plan revised since.
+  The previous report still reaches the next attempt's dossier.
+- **A wait on a person is a stop, not a decision (#107).** `awaiting_operator` and
+  `awaiting_evidence` left the attention queue, where the board asked for "a disposition for each"
+  that nothing can record. The board recommends the owed work the build listed, then `rein build`,
+  and `rein observe` counts every recorded wait rather than only an open one. The reason on the
+  remaining attention row says how a condition actually retires.
+- **A task reviewer's `question` survives its task landing, and is on the board while the build
+  runs (#108).** The write that marked a task `done` or `awaiting-evidence` dropped its whole
+  handoff, the reviewer's findings with it, so no question asked of a task that landed reached
+  acceptance. A landed task keeps `handoff.review`; a new attempt drops the last attempt's. The
+  console prints each non-blocking finding's anchor and statement, and each open question is an
+  `attention` row naming what answers it: acceptance, or `/revise` now.
+- **A confirmation refused for lack of a terminal names every route that works (#109).** One
+  sentence for the four verbs that ask: not through an agent's run-this-command prefix, or, where
+  the dashboard takes the same decision, where in `rein ui`.
+
 ## [0.13.0] - 2026-10-01
 
 **A minor release: the format moves to `rein-grounded-v11`, and every repository needs `rein sync
