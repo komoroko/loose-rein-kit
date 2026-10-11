@@ -7,10 +7,11 @@ new one). `pyproject.toml [project] version` is the single version source.
 ## [0.14.0] - 2026-10-11
 
 **A minor release: the format moves to `rein-grounded-v12`, and every repository needs `rein sync
---force`.** `config.yaml` gains `review_policy.file_readers`, and a generated `review.yaml`'s
-coverage records `read_files` and `file_readers` where it had `analyzers`. No `review.yaml` ever
-held `analyzers` (nothing passed one), so an existing review reads as it is. Six issues filed from
-one recorded cycle on 0.13.0, each fixed where it starts.
+--force`.** `config.yaml` gains `review_policy.file_readers`, a generated `review.yaml`'s
+coverage records `read_files` and `file_readers` where it had `analyzers`, and a task's
+`handoff` in `state.yaml` gains `previous`. No `review.yaml` ever held `analyzers` (nothing passed
+one), so an existing review reads as it is. Six issues filed from one recorded cycle on 0.13.0,
+each fixed where it starts.
 
 - **A changed file the text analysis cannot read is read by a file reader, not exempted by where
   it sits (#106).** Screenshots under a directory a criterion declared made coverage
@@ -19,14 +20,20 @@ one recorded cycle on 0.13.0, each fixed where it starts.
   hole #79 closed (`dist/app.so` exempted with everything else), and accepting the gap by hand is
   not open for a critical unknown. So the gap is closed by reading: `review_policy.file_readers`
   declares, per kind of file, a deterministic command that runs in `quality_gate_profile` with
-  nothing of the repository mounted, is handed the one committed file, and exits 0 only when it
-  accounts for the whole of it. The manifest names the reader beside every file it read, with the
-  digest of its command and image; a file no reader claims, or one its reader refuses, stays unread
-  and the detail says which reader refused it and why. Any kind of file, not only images.
-- A reader's acceptance of a blob is cached in the evidence ledger, so the board, `doctor` and the
-  review do not run it twice over the same bytes; a refusal is always asked again.
-- A reader whose command names a path inside the repository is refused: the change under review
-  could rewrite it.
+  nothing mounted but the one committed file, and exits 0 only when it accounts for the whole of
+  it. The manifest names the reader beside every file it read, with the digest of its command and
+  image; a file no reader claims, or one its reader refuses, stays unread and the detail says which
+  reader refused it and why. Any kind of file, not only images.
+- A reader runs only in an `oci` profile, and two readers may not share a name; `config.yaml` is
+  refused otherwise, so the mandate cannot freeze it. On the host a parser would be handed bytes
+  the change chose, and a command naming a script in the repository would run whatever the change
+  made of it; in the container neither exists.
+- A reader's acceptance of a blob is cached in the evidence ledger; a refusal is asked again by the
+  next run, and once per blob within one. The board never starts a reader: a file one claims and
+  the ledger has no answer for is named as not read yet, and `rein doctor` reads it.
+- A ledger flush adds to the evidence file as it stands rather than writing back the copy it
+  loaded, so a reader's acceptance recorded during a build, or another process's facts, are no
+  longer erased by the build's own flush when it ends.
 - The unused `diff_facts.Analyzer` hook, which nothing ever passed and which never saw a binary,
   is gone; file readers are what it was for.
 - The gate's and `doctor`'s remedy for unread files, and `/tasks`, name file readers beside a
@@ -46,18 +53,20 @@ one recorded cycle on 0.13.0, each fixed where it starts.
 - **A report kept across a reset is never read as the next attempt's own (#105).** `rein task
   reset` without `--fresh` keeps the handoff, and an attempt that ended without `rein report`
   re-raised the previous attempt's `needs-revision` byte for byte, against a plan revised since.
-  The previous report still reaches the next attempt's dossier.
+  A new attempt moves the last one's report and reviewer findings under `handoff.previous`, which
+  the next attempt's dossier hands over and nothing reads as the running attempt's own.
 - **A wait on a person is a stop, not a decision (#107).** `awaiting_operator` and
   `awaiting_evidence` left the attention queue, where the board asked for "a disposition for each"
   that nothing can record. The board recommends the owed work the build listed, then `rein build`,
-  and `rein observe` counts every recorded wait rather than only an open one. The reason on the
-  remaining attention row says how a condition actually retires.
+  until the build moves again, with any decision open beside it named too, and `rein observe`
+  counts every recorded wait rather than only an open one. The reason on the remaining attention
+  row says how a condition actually retires.
 - **A task reviewer's `question` survives its task landing, and is on the board while the build
   runs (#108).** The write that marked a task `done` or `awaiting-evidence` dropped its whole
   handoff, the reviewer's findings with it, so no question asked of a task that landed reached
-  acceptance. A landed task keeps `handoff.review`; a new attempt drops the last attempt's. The
-  console prints each non-blocking finding's anchor and statement, and each open question is an
-  `attention` row naming what answers it: acceptance, or `/revise` now.
+  acceptance. A landed task keeps its own attempt's `handoff.review`. The console prints each
+  non-blocking finding's anchor and statement, and each open question is an `attention` row naming
+  what answers it: acceptance, or `/revise` now.
 - **A confirmation refused for lack of a terminal names every route that works (#109).** One
   sentence for the four verbs that ask: not through an agent's run-this-command prefix, or, where
   the dashboard takes the same decision, where in `rein ui`.
