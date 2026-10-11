@@ -31,7 +31,6 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
 from rein import (
@@ -1526,31 +1525,6 @@ def _extra_behaviors(
 # -- CLI ----------------------------------------------------------------------
 
 
-#: The longest `--supervise` will wait on one refusal, however far off the reset it was told about.
-#: A session limit that lifts tomorrow is not something to hold a terminal open for, and a CLI that
-#: names a time this far out is likelier to have been misread than to be right.
-MAX_SUPERVISE_SLEEP_SEC = 6 * 3600
-
-
-def _supervise_delay(failure: review_policy.AdapterFailure, interval_sec: int) -> tuple[int, str]:
-    """`(seconds to sleep, the CLI's own words)` before trying this stage again.
-
-    The reset time was being extracted, printed, and thrown away: seven attempts fifteen minutes
-    apart, each refused in under half a second against a limit that lifted at 06:50, and the host
-    session ended before it did. Nothing was learned by any of them.
-
-    So when the refusal names a time, wait until it (plus `faults.RESET_MARGIN_SEC`) instead of a
-    fixed interval — capped, and never shorter than one interval, because a reset that has already
-    passed by the time this reads it would otherwise turn the supervisor into a spin.
-    """
-    hint = faults.reset_hint(failure.output)
-    when = faults.reset_at(failure.output)
-    if when is None:
-        return interval_sec, hint
-    seconds = int((when - datetime.now(timezone.utc)).total_seconds()) + faults.RESET_MARGIN_SEC
-    return max(interval_sec, min(seconds, MAX_SUPERVISE_SLEEP_SEC)), hint
-
-
 def _generate_cli(
     repo: repo_mod.Repo,
     *,
@@ -1593,7 +1567,7 @@ def _generate_cli(
         except review_policy.AdapterFailure as failure:
             if not supervise or not _worth_waiting_for(failure):
                 raise
-            delay, hint = _supervise_delay(failure, interval_sec)
+            delay, hint = faults.supervise_delay(failure.output, interval_sec)
             logger.info(
                 f"[supervise] attempt {attempt}: {failure} — sleeping {delay}s"
                 + (f" (the CLI said: {hint})" if hint else "")
@@ -1641,7 +1615,10 @@ def main(argv: list[str] | None = None) -> int:
         "--supervise-interval-sec",
         type=int,
         default=900,
-        help="seconds to sleep between retries under --supervise (default: 900, the build loop's interval)",
+        help=(
+            "seconds to sleep between retries under --supervise when the refusal names no reset time "
+            "(default: 900); a named reset is waited for instead, capped at six hours"
+        ),
     )
     sub.add_parser("show", help="print the current review.yaml")
     args = parser.parse_args(argv)

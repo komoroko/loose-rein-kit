@@ -33,6 +33,7 @@ from rein import (
     diff_facts,
     digests,
     event_chain,
+    faults,
     human_review,
     models,
     review,
@@ -1719,7 +1720,7 @@ def test_supervise_runs_it_again_and_returns_the_review_that_worked(review_repo:
 
             def fail(role: str, request: Mapping[str, Any]) -> str:
                 # Names no reset time on purpose: with one, the loop would wait until it, which is
-                # the point of `_supervise_delay` and is tested there rather than by sleeping here.
+                # the point of `faults.supervise_delay` and is tested there rather than by sleeping here.
                 raise _adapter_failure("429 rate limit exceeded")
 
             return _reviewers(fail)
@@ -1751,16 +1752,16 @@ def test_supervise_waits_until_the_reset_the_cli_named() -> None:
             "duration_ms": 412,
         }
     )
-    delay, hint = review._supervise_delay(_adapter_failure(envelope), interval_sec=900)
+    delay, hint = faults.supervise_delay(envelope, interval_sec=900)
 
     assert delay > 900, "a fifteen-minute interval against a limit that lifts hours from now"
-    assert delay <= review.MAX_SUPERVISE_SLEEP_SEC
+    assert delay <= faults.MAX_SUPERVISE_SLEEP_SEC
     # The hint is the sentence, not a slice landing mid-token in the telemetry that follows it.
     assert hint == "resets 6:50am (Asia/Tokyo)"
 
 
 def test_supervise_falls_back_to_the_interval_when_no_time_is_named() -> None:
-    delay, hint = review._supervise_delay(_adapter_failure("429 rate limit exceeded"), interval_sec=900)
+    delay, hint = faults.supervise_delay("429 rate limit exceeded", interval_sec=900)
     assert (delay, hint) == (900, "")
 
 

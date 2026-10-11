@@ -1780,6 +1780,8 @@ def test_supervise_retries_on_exit_retry_later_until_something_else(
         def __init__(self, config: object, dry_run: bool, repo: object) -> None:
             seen_dry_run.append(dry_run)
 
+        refusal = ""
+
         def run(self) -> int:
             return next(codes)
 
@@ -1790,6 +1792,42 @@ def test_supervise_retries_on_exit_retry_later_until_something_else(
     assert build_loop._supervise(config, repo, interval_sec=7) == common.EXIT_DONE
     assert slept == [7, 7]
     assert seen_dry_run == [False, False, False]  # --supervise never runs the loop read-only
+
+
+def test_supervise_waits_until_the_reset_the_refused_launch_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#104: the build supervisor slept a fixed interval against a named reset — T-064 was launched
+    fifteen times, every ~15 minutes, each refused with the same `resets 5:20am (Asia/Tokyo)`."""
+    root = build_repo(tmp_path)
+    repo = repo_mod.Repo(root)
+    config = build_loop.Config.load(repo)
+    codes = iter([common.EXIT_RETRY_LATER, common.EXIT_DONE])
+
+    class FakeOrchestrator:
+        def __init__(self, config: object, dry_run: bool, repo: object) -> None:
+            self.refusal = ""
+
+        def run(self) -> int:
+            self.refusal = "You've hit your session limit \u00b7 resets 5:20am (Asia/Tokyo)"
+            return next(codes)
+
+    monkeypatch.setattr(build_loop, "Orchestrator", FakeOrchestrator)
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", slept.append)
+
+    assert build_loop._supervise(config, repo, interval_sec=7) == common.EXIT_DONE
+    assert len(slept) == 1
+    assert 7 < slept[0] <= faults.MAX_SUPERVISE_SLEEP_SEC
+
+
+def test_an_aborted_run_hands_the_supervisor_what_the_cli_said(tmp_path: Path) -> None:
+    """The refusal reaches `_supervise` through the run that returned 3, and only a retryable one."""
+    loop = build_loop.Orchestrator(build_loop.Config.load(repo_mod.Repo(build_repo(tmp_path))), dry_run=True)
+    said = "You've hit your session limit \u00b7 resets 5:20am (Asia/Tokyo)"
+    transient = build_loop.EnvironmentFault(faults.Fault.ENV_TRANSIENT, where="T-001", rc=1, output=said)
+    assert loop._abort_run(transient) == common.EXIT_RETRY_LATER
+    assert loop.refusal == said
 
 
 @pytest.mark.parametrize("rc", [common.EXIT_DONE, common.EXIT_HUMAN_NEEDED, common.EXIT_CANNOT_PROCEED])

@@ -313,6 +313,36 @@ def reset_at(output: str, *, now: datetime | None = None) -> datetime | None:
     return target if target > current else target + timedelta(days=1)
 
 
+#: The longest `--supervise` will wait on one refusal, however far off the reset it was told about.
+#: A session limit that lifts tomorrow is not something to hold a terminal open for, and a CLI that
+#: names a time this far out is likelier to have been misread than to be right.
+MAX_SUPERVISE_SLEEP_SEC = 6 * 3600
+
+
+def supervise_delay(output: str, interval_sec: int) -> tuple[int, str]:
+    """`(seconds to sleep, the CLI's own words)` before a supervised run tries again.
+
+    The reset time was being extracted, printed, and thrown away: seven attempts fifteen minutes
+    apart, each refused in under half a second against a limit that lifted at 06:50, and the host
+    session ended before it did. Nothing was learned by any of them.
+
+    So when the refusal names a time, wait until it (plus `RESET_MARGIN_SEC`) instead of a fixed
+    interval — capped, and never shorter than one interval, because a reset that has already passed
+    by the time this reads it would otherwise turn the supervisor into a spin.
+
+    One function for both supervisors, `rein build --supervise` and `rein review generate
+    --supervise`. The fix for the review's went into the review module alone, and the build's kept
+    relaunching every fifteen minutes against a named reset: fifty-one refused launches in one
+    cycle, each decidable as futile from the previous one's own output (#104).
+    """
+    hint = reset_hint(output)
+    when = reset_at(output)
+    if when is None:
+        return interval_sec, hint
+    seconds = int((when - datetime.now(timezone.utc)).total_seconds()) + RESET_MARGIN_SEC
+    return max(interval_sec, min(seconds, MAX_SUPERVISE_SLEEP_SEC)), hint
+
+
 def said(output: str) -> str:
     """What the launch reported, out of whatever the CLI wrote to its streams.
 

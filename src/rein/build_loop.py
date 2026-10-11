@@ -988,6 +988,10 @@ class Orchestrator:
         # Dry-run status overlay: the simulated statuses live here instead of tasks.yaml, so the
         # loop can progress to completion while the run stays strictly read-only.
         self._sim_status: dict[str, str] = {}
+        #: What the machine said when this run ended with `EXIT_RETRY_LATER` ("" when it said
+        #: nothing, as a held lock does). `--supervise` schedules the next attempt from it: the
+        #: exit code alone carries no reset time, and `run()` returns only the code.
+        self.refusal = ""
         # The run's allowance for retrying a launch the *machine* failed. One counter for the
         # whole run, guarded because parallel leaves draw on it at the same time: an environment
         # fault is a property of the machine, so a per-task budget would let one broken
@@ -3716,7 +3720,10 @@ class Orchestrator:
     def _abort_run(self, fault: EnvironmentFault) -> int:
         """End the run because the machine failed. Record it; mark no task."""
         self._record_abort(fault)
-        return common.EXIT_RETRY_LATER if fault.retryable else common.EXIT_CANNOT_PROCEED
+        if not fault.retryable:
+            return common.EXIT_CANNOT_PROCEED
+        self.refusal = fault.output
+        return common.EXIT_RETRY_LATER
 
     def run(self) -> int:
         if self.state is None:
@@ -4850,6 +4857,7 @@ class Orchestrator:
             return True
         except review_policy.AdapterFailure as failure:
             if faults.classify_launch(failure.rc, failure.output) is faults.Fault.ENV_TRANSIENT:
+                self.refusal = failure.output
                 raise StopLoop(
                     f"the grounded review could not be taken: {failure}. Nothing is lost — every stage that "
                     "answered is cached. Re-run `rein build` (or `rein review generate --supervise`).",
@@ -5338,7 +5346,10 @@ def main(argv: list[str] | None = None) -> int:
         "--supervise-interval-sec",
         type=int,
         default=900,
-        help="seconds to sleep between retries under --supervise (default: 900, the documented recipe's interval)",
+        help=(
+            "seconds to sleep between retries under --supervise when the refusal names no reset time "
+            "(default: 900); a named reset is waited for instead, capped at six hours"
+        ),
     )
     args = parser.parse_args(argv)
     common.configure_logging()
@@ -5381,15 +5392,23 @@ def _supervise(config: Config, repo: repo_mod.Repo, interval_sec: int) -> int:
     so it sees `state.yaml` as it stands and takes/releases the build lock exactly as a
     standalone `rein build` would — nothing here changes what one run does, only whether
     something is still watching after it returns 3.
+
+    The wait between attempts is the review supervisor's (`faults.supervise_delay`): until the
+    reset the refusal named, or the interval when it named none.
     """
     attempt = 0
     while True:
         attempt += 1
-        rc = Orchestrator(config, dry_run=False, repo=repo).run()
+        run = Orchestrator(config, dry_run=False, repo=repo)
+        rc = run.run()
         if rc != common.EXIT_RETRY_LATER:
             return rc
-        logger.info(f"[supervise] attempt {attempt}: capacity/lock retry — sleeping {interval_sec}s")
-        time.sleep(interval_sec)
+        delay, hint = faults.supervise_delay(run.refusal, interval_sec)
+        logger.info(
+            f"[supervise] attempt {attempt}: capacity/lock retry — sleeping {delay}s"
+            + (f" (the CLI said: {hint})" if hint else "")
+        )
+        time.sleep(delay)
 
 
 if __name__ == "__main__":
