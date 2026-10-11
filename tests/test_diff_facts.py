@@ -116,7 +116,7 @@ def test_a_manifest_naming_an_unread_file_can_actually_be_written() -> None:
     facts = diff_facts.analyze(_diff("design/logo.psd", added=["\x00x"]))
     entry = facts.coverage.to_manifest()
     assert entry["unsupported_files"] == [
-        {"path": "design/logo.psd", "reason": "unsupported_language", "detail": "no analyzer for .psd"}
+        {"path": "design/logo.psd", "reason": "unsupported_language", "detail": "no reader for .psd"}
     ]
     document = {
         "machine": {

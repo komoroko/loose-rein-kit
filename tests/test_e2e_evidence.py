@@ -299,6 +299,26 @@ def test_the_ledger_survives_a_damaged_line(tmp_path: Path) -> None:
     assert reloaded.hit(evidence.KIND_GATE_STEP, "sha256:" + "e" * 64, ("test",))
 
 
+def test_a_flush_adds_to_what_another_ledger_flushed_since(tmp_path: Path) -> None:
+    """The build's ledger is loaded when the run starts and flushed when it ends; a file-reader
+    scope inside the run flushes its own in between. Writing back the copy loaded at the start
+    erased the reader's acceptance, and the next run read the same blob again."""
+    path = tmp_path / "evidence.jsonl"
+    build, reader = evidence.Ledger(path=path), evidence.Ledger(path=path)
+    read, green = ("png", "sha256:r"), ("test", "make", "test")
+
+    reader.record(evidence.KIND_READER, "blob", read)
+    reader.flush()
+    build.record(evidence.KIND_GATE_STEP, "sha256:" + "c" * 64, green)
+    build.flush()
+
+    reloaded = evidence.Ledger(path=path)
+    reloaded._load()
+    assert reloaded.hit(evidence.KIND_READER, "blob", read)
+    assert reloaded.hit(evidence.KIND_GATE_STEP, "sha256:" + "c" * 64, green)
+    assert build.hit(evidence.KIND_READER, "blob", read)
+
+
 # --- the prose the build reads --------------------------------------------------
 
 

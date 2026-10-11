@@ -81,6 +81,7 @@ from rein import (
     evidence,
     executors,
     faults,
+    file_readers,
     gate_guard,
     human_review,
     lenses,
@@ -496,6 +497,7 @@ def set_task_status(
     commit: str = "",
     evidence: Mapping[str, Any] | None = None,
     handoff: Mapping[str, Any] | None = None,
+    new_attempt: bool = False,
 ) -> None:
     """Write one task's status and the event that explains it, in one transaction.
 
@@ -513,6 +515,11 @@ def set_task_status(
     because a transaction here must record *why*, and "an agent produced some output" is not a
     reason a hash-chained log should carry a line for.
 
+    `new_attempt` moves what the attempt before said about itself, its `report` and its
+    reviewer's `review`, under `handoff.previous` (`_begin_attempt`). `handoff.review` is the one
+    part a landed task keeps: its reviewer's findings, which `brief.residual_findings` carries to
+    acceptance, and only this attempt's.
+
     Retried on a lost race with a leaf writing its own task entry through the control plane.
     """
     if status not in models.TASK_STATUS_VALUES:
@@ -526,6 +533,7 @@ def set_task_status(
             commit=commit,
             evidence=evidence or {},
             handoff=handoff or {},
+            new_attempt=new_attempt,
         )
     )
 
@@ -565,6 +573,7 @@ def _set_task_status_once(
     commit: str,
     evidence: Mapping[str, Any],
     handoff: Mapping[str, Any],
+    new_attempt: bool,
 ) -> None:
     store = store_mod.Store(repo)
     state = store.read_state()
@@ -576,6 +585,8 @@ def _set_task_status_once(
     raw = json.loads(json.dumps(state.raw))
     tasks = raw.setdefault("tasks", {})
     entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
+    if new_attempt:
+        entry = _begin_attempt(entry)
     attempts = entry.get("attempts", 0) if isinstance(entry.get("attempts"), int) else 0
     if status == "in-progress":
         attempts += 1
@@ -585,7 +596,16 @@ def _set_task_status_once(
         # tree — and differ only in whether an observation nobody here could make is outstanding.
         # So both carry the record, and a promotion from one to the other keeps the one already
         # written rather than needing the run that established it to still be alive.
+        #
+        # The handoff goes, except this attempt's reviewer findings: a `question` stops nothing by
+        # design and reaches a person only from here (`brief.residual_findings`). Dropping the
+        # whole handoff dropped every question a task that landed was asked (#108). The previous
+        # attempt's findings, under `previous`, go with the rest: they were made against a tree
+        # this landing replaced.
+        review = _merge_handoff(entry.get("handoff"), handoff).get("review")
         merged.pop("handoff", None)
+        if review:
+            merged["handoff"] = {"review": review, "updated_at": event_chain.now_iso()}
         previous = entry.get("evidence")
         carried: Mapping[str, Any] = evidence or (previous if isinstance(previous, dict) else {})
         merged["evidence"] = {**dict(carried), "updated_at": event_chain.now_iso()}
@@ -621,6 +641,33 @@ def _set_task_status_once(
 
 
 # --- what the next attempt inherits (through the Central Store) ----------------
+
+#: What an attempt says about itself: the implementer's `rein report` and the reviewer's findings.
+#: Each is true of one attempt's tree, so a new attempt moves them under `handoff.previous`.
+_ATTEMPT_FIELDS = ("report", "review")
+
+
+def _begin_attempt(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """`entry` with the last attempt's own account moved under `handoff.previous`.
+
+    One key had meant two things. The next attempt's dossier hands the previous implementer's
+    report and reviewer's findings over on purpose (`dossier._previous_attempt`), and the loop
+    reads the same keys as what *this* attempt said: `_read_report` re-raised an inherited
+    `needs-revision` byte for byte against a revised plan (#105), and a landed task's residual
+    questions would have carried the findings made against a tree it replaced (#108). Kept apart,
+    neither reader has to tell them apart. Only the attempt just before is kept: one that said
+    nothing about itself leaves nothing under `previous`, and an older account is older than that.
+    """
+    handoff = entry.get("handoff")
+    if not isinstance(handoff, Mapping):
+        return dict(entry)
+    kept = {k: v for k, v in handoff.items() if k not in _ATTEMPT_FIELDS and k != "previous"}
+    previous = {k: handoff[k] for k in _ATTEMPT_FIELDS if isinstance(handoff.get(k), Mapping)}
+    if previous:
+        kept["previous"] = previous
+    return {**entry, "handoff": kept}
+
+
 #
 # The implementer's own agent session is process-local and dies with the terminal that ran it, so
 # what a build restarted from another terminal inherits has to be written down: which gate step
@@ -988,6 +1035,10 @@ class Orchestrator:
         # Dry-run status overlay: the simulated statuses live here instead of tasks.yaml, so the
         # loop can progress to completion while the run stays strictly read-only.
         self._sim_status: dict[str, str] = {}
+        #: What the machine said when this run ended with `EXIT_RETRY_LATER` ("" when it said
+        #: nothing, as a held lock does). `--supervise` schedules the next attempt from it: the
+        #: exit code alone carries no reset time, and `run()` returns only the code.
+        self.refusal = ""
         # The run's allowance for retrying a launch the *machine* failed. One counter for the
         # whole run, guarded because parallel leaves draw on it at the same time: an environment
         # fault is a property of the machine, so a per-task budget would let one broken
@@ -1222,7 +1273,7 @@ class Orchestrator:
         with self._evidence_lock:
             return self._pending_diagnostics.pop(task_id, {})
 
-    def _set_status(self, task_id: str, status: str, *, commit: str = "") -> None:
+    def _set_status(self, task_id: str, status: str, *, commit: str = "", new_attempt: bool = False) -> None:
         """Record a status, with the evidence and diagnostics this run holds for the task."""
         if self.dry_run:
             self._sim_status[task_id] = status
@@ -1235,6 +1286,7 @@ class Orchestrator:
             commit=commit,
             evidence=self._evidence.get(task_id, {}),
             handoff=self._take_diagnostics(task_id),
+            new_attempt=new_attempt,
         )
 
     # -- launching an agent (the machine's side of the boundary) --
@@ -1329,9 +1381,9 @@ class Orchestrator:
         `knowledge_gap` (what `rein events --summary` lists as still open) and keeps the kind in
         the detail, the same shape `set_task_status` uses to map statuses onto event names.
 
-        There is no "resolve" verb any more: an escalation is closed by a signed disposition in
-        the review, not by a flag somebody flips in a log (`rein events --summary` lists
-        what is still open).
+        There is no "resolve" verb: nothing closes a record by flipping a flag in a log. One
+        retires when what it names has moved on (`events.open_attention`), and a wait on a person
+        (`events.WAIT_KINDS`) is recorded here but never queued as a decision.
         """
         logger.warning(f"[escalation] {message}")
         self._event("knowledge_gap", task or self.cycle_id, {"kind": kind, "message": message})
@@ -1995,7 +2047,10 @@ class Orchestrator:
                 )
                 text = f"{text}\n{moved_line}" if text else moved_line
             if findings and not outstanding:
-                print(f"    [review] {task_id}: {len(findings)} finding(s), none blocking")
+                print(
+                    f"    [review] {task_id}: {len(findings)} finding(s), none blocking:\n"
+                    + dossier.render_findings(findings)
+                )
             answers[task_id] = ReviewAnswer(send_back=text)
         return answers
 
@@ -2634,43 +2689,48 @@ class Orchestrator:
             # One analysis of one whole diff answers all three: the floor the gate will key on,
             # whether the gate will compose at all, and which readings it will take.
             graph = self._load_graph()
-            readings, risk_floor, effective = review_reading.change_readings(
-                self.repo,
-                self._plan,
-                graph.tasks,
-                base=base,
-                head=head,
-                exclude=exclude,
-                mode=self.config.raw.composition,
-                ceiling=int(limits["max_diff_bytes"]),
-            )
-            if models.risk_at_least(effective, "critical"):
-                self._warming_off = True
-                print(
-                    f"    [review] {task.id}: the change is {effective} — acceptance reads it whole, "
-                    "so no reading is warmed from here on"
-                )
-                return []
-            landed = {t.id for t in graph.tasks if t.status in _LANDED_STATUSES}
-            due = [r for r in readings if task.id in r.members and set(r.members) <= landed]
-            return [
-                review_reading.warm(
+            with file_readers.opened(self.repo, self.config.raw, head, run=True) as declared:
+                readings, risk_floor, effective = review_reading.change_readings(
                     self.repo,
-                    review_transport.StagedReviewers(self.repo, config=self.config.raw, readings=self.config.readings),
-                    reading=reading,
+                    self._plan,
+                    graph.tasks,
                     base=base,
                     head=head,
                     exclude=exclude,
-                    limits=limits,
-                    evidence=self._plan.artifact_paths if self._plan is not None else (),
-                    risk_floor=risk_floor,
-                    host_surface=review_reading.host_surface_digest(self.repo, head),
-                    config=self.config.raw,
-                    cache=review_cache.StageCache(self.repo.root),
-                    readings=self.config.readings,
+                    mode=self.config.raw.composition,
+                    ceiling=int(limits["max_diff_bytes"]),
+                    file_readers=declared,
                 )
-                for reading in due
-            ]
+                if models.risk_at_least(effective, "critical"):
+                    self._warming_off = True
+                    print(
+                        f"    [review] {task.id}: the change is {effective} — acceptance reads it whole, "
+                        "so no reading is warmed from here on"
+                    )
+                    return []
+                landed = {t.id for t in graph.tasks if t.status in _LANDED_STATUSES}
+                due = [r for r in readings if task.id in r.members and set(r.members) <= landed]
+                return [
+                    review_reading.warm(
+                        self.repo,
+                        review_transport.StagedReviewers(
+                            self.repo, config=self.config.raw, readings=self.config.readings
+                        ),
+                        reading=reading,
+                        base=base,
+                        head=head,
+                        exclude=exclude,
+                        limits=limits,
+                        evidence=self._plan.artifact_paths if self._plan is not None else (),
+                        file_readers=declared,
+                        risk_floor=risk_floor,
+                        host_surface=review_reading.host_surface_digest(self.repo, head),
+                        config=self.config.raw,
+                        cache=review_cache.StageCache(self.repo.root),
+                        readings=self.config.readings,
+                    )
+                    for reading in due
+                ]
         except (
             review_policy.ReviewPolicyError,
             review_transport.TransportError,
@@ -2828,7 +2888,10 @@ class Orchestrator:
             self._evidence[task.id] = record
 
     def _read_report(self, task: dag.Task) -> dict[str, Any]:
-        """What the implementer said about this attempt, through `rein report`. {} when it said nothing."""
+        """What the implementer said about this attempt, through `rein report`. {} when it said nothing.
+
+        Only this attempt's: the one before it is under `handoff.previous` (`_begin_attempt`).
+        """
         if self.dry_run:
             return {}
         report = self._handoff_for(task).get("report")
@@ -3499,9 +3562,12 @@ class Orchestrator:
             )
             outstanding = dossier.must_fix(findings)
             if not outstanding:
-                self._file_integration_findings(findings, tasks)
                 if findings:
-                    print(f"    [review] {ids}: {len(findings)} finding(s) about the join, none blocking")
+                    print(
+                        f"    [review] {ids}: {len(findings)} finding(s) about the join, none blocking:\n"
+                        + dossier.render_findings(findings)
+                    )
+                self._file_integration_findings(findings, tasks)
                 return
             if attempt == rounds:
                 raise StopLoop(
@@ -3534,7 +3600,7 @@ class Orchestrator:
             if owner:
                 self._add_review_findings(owner, [finding])
             else:
-                print(f"    [review] a finding about the join no task's scope owns: {finding.get('statement', '')}")
+                print(f"    [review] no task's scope owns {finding.get('anchor') or 'the finding with no anchor'}")
 
     # -- worktree / merge --
 
@@ -3716,7 +3782,10 @@ class Orchestrator:
     def _abort_run(self, fault: EnvironmentFault) -> int:
         """End the run because the machine failed. Record it; mark no task."""
         self._record_abort(fault)
-        return common.EXIT_RETRY_LATER if fault.retryable else common.EXIT_CANNOT_PROCEED
+        if not fault.retryable:
+            return common.EXIT_CANNOT_PROCEED
+        self.refusal = fault.output
+        return common.EXIT_RETRY_LATER
 
     def run(self) -> int:
         if self.state is None:
@@ -4482,7 +4551,7 @@ class Orchestrator:
         because a *different* leaf hit a session limit would be its own kind of dishonesty.
         """
         for task in tasks:
-            self._set_status(task.id, "in-progress")
+            self._set_status(task.id, "in-progress", new_attempt=True)
         # Worktree creation is serial (avoid git lock contention). The implementation is run in parallel after.
         branches = {
             task.id: self.ws.add_worktree(task.id, str(self._handoff_for(task).get("salvage_branch", "")))
@@ -4711,7 +4780,7 @@ class Orchestrator:
             return
         from rein import review as review_mod
 
-        view = review_mod.outlook(self.repo)
+        view = review_mod.outlook(self.repo, run_readers=True)
         if view is None:
             return
         if view.over_budget:
@@ -4850,6 +4919,7 @@ class Orchestrator:
             return True
         except review_policy.AdapterFailure as failure:
             if faults.classify_launch(failure.rc, failure.output) is faults.Fault.ENV_TRANSIENT:
+                self.refusal = failure.output
                 raise StopLoop(
                     f"the grounded review could not be taken: {failure}. Nothing is lost — every stage that "
                     "answered is cached. Re-run `rein build` (or `rein review generate --supervise`).",
@@ -5338,7 +5408,10 @@ def main(argv: list[str] | None = None) -> int:
         "--supervise-interval-sec",
         type=int,
         default=900,
-        help="seconds to sleep between retries under --supervise (default: 900, the documented recipe's interval)",
+        help=(
+            "seconds to sleep between retries under --supervise when the refusal names no reset time "
+            "(default: 900); a named reset is waited for instead, capped at six hours"
+        ),
     )
     args = parser.parse_args(argv)
     common.configure_logging()
@@ -5381,15 +5454,23 @@ def _supervise(config: Config, repo: repo_mod.Repo, interval_sec: int) -> int:
     so it sees `state.yaml` as it stands and takes/releases the build lock exactly as a
     standalone `rein build` would — nothing here changes what one run does, only whether
     something is still watching after it returns 3.
+
+    The wait between attempts is the review supervisor's (`faults.supervise_delay`): until the
+    reset the refusal named, or the interval when it named none.
     """
     attempt = 0
     while True:
         attempt += 1
-        rc = Orchestrator(config, dry_run=False, repo=repo).run()
+        run = Orchestrator(config, dry_run=False, repo=repo)
+        rc = run.run()
         if rc != common.EXIT_RETRY_LATER:
             return rc
-        logger.info(f"[supervise] attempt {attempt}: capacity/lock retry — sleeping {interval_sec}s")
-        time.sleep(interval_sec)
+        delay, hint = faults.supervise_delay(run.refusal, interval_sec)
+        logger.info(
+            f"[supervise] attempt {attempt}: capacity/lock retry — sleeping {delay}s"
+            + (f" (the CLI said: {hint})" if hint else "")
+        )
+        time.sleep(delay)
 
 
 if __name__ == "__main__":

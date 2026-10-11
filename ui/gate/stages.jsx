@@ -42,6 +42,7 @@ export function ScopeStage({ data }) {
   const unsupported = cov.unsupported_files || [];
   const generated = cov.generated_files || [];
   const evidence = cov.evidence_files || [];
+  const readByReader = cov.read_files || [];
 
   return (
     <>
@@ -108,6 +109,14 @@ export function ScopeStage({ data }) {
         {evidence.length ? (
           <div className="row" style={{ marginTop: ".5rem" }}>
             declared evidence, not read as code: <span className="mono">{evidence.join(", ")}</span>
+          </div>
+        ) : null}
+        {/* Read, by a file reader the mandate froze — named beside each file, because "read" with
+            nobody named is a claim nobody can check. */}
+        {readByReader.length ? (
+          <div className="row" style={{ marginTop: ".5rem" }}>
+            read by a file reader:{" "}
+            <span className="mono">{readByReader.map((r) => `${r.path} (${r.reader})`).join(", ")}</span>
           </div>
         ) : null}
         {cov.coverage_status !== "sufficient" ? (

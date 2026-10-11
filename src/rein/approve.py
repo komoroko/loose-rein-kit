@@ -1374,8 +1374,10 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
 
     if not common.stdin_is_terminal():
         raise ApprovalError(
-            f"gate '{gate}' needs a confirmation typed at a terminal, and stdin is not one. "
-            "Run this in your shell — there is deliberately no flag that skips it."
+            common.terminal_refusal(
+                f"approving gate '{gate}' (`rein approve {gate}`)",
+                ui=f'approve it with the gate screen\'s "Approve gate {gate}" button',
+            )
         )
     say(f"gate '{gate}' is ready. This approval will cover:\n{render_subject(subject)}\n")
     # One source for both routes. This function used to call `crossing_declarations` and

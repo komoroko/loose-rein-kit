@@ -33,6 +33,8 @@ from rein import (
     diff_facts,
     digests,
     event_chain,
+    executors,
+    faults,
     human_review,
     models,
     review,
@@ -1190,7 +1192,7 @@ def test_a_lockfile_nobody_is_sent_does_not_put_a_reading_over_budget(tmp_path: 
     exclude = review.not_the_product(repo, store.read_state())
 
     measured = review_reading.read_facts(
-        repo, base=seed, head="HEAD", exclude=exclude, limits={"max_diff_bytes": 4096}, evidence=()
+        repo, base=seed, head="HEAD", exclude=exclude, limits={"max_diff_bytes": 4096}, evidence=(), file_readers=()
     )
 
     assert measured.analyzed_bytes > 4096, "the manifest still reads the whole diff"
@@ -1719,7 +1721,7 @@ def test_supervise_runs_it_again_and_returns_the_review_that_worked(review_repo:
 
             def fail(role: str, request: Mapping[str, Any]) -> str:
                 # Names no reset time on purpose: with one, the loop would wait until it, which is
-                # the point of `_supervise_delay` and is tested there rather than by sleeping here.
+                # the point of `faults.supervise_delay` and is tested there rather than by sleeping here.
                 raise _adapter_failure("429 rate limit exceeded")
 
             return _reviewers(fail)
@@ -1751,16 +1753,16 @@ def test_supervise_waits_until_the_reset_the_cli_named() -> None:
             "duration_ms": 412,
         }
     )
-    delay, hint = review._supervise_delay(_adapter_failure(envelope), interval_sec=900)
+    delay, hint = faults.supervise_delay(envelope, interval_sec=900)
 
     assert delay > 900, "a fifteen-minute interval against a limit that lifts hours from now"
-    assert delay <= review.MAX_SUPERVISE_SLEEP_SEC
+    assert delay <= faults.MAX_SUPERVISE_SLEEP_SEC
     # The hint is the sentence, not a slice landing mid-token in the telemetry that follows it.
     assert hint == "resets 6:50am (Asia/Tokyo)"
 
 
 def test_supervise_falls_back_to_the_interval_when_no_time_is_named() -> None:
-    delay, hint = review._supervise_delay(_adapter_failure("429 rate limit exceeded"), interval_sec=900)
+    delay, hint = faults.supervise_delay("429 rate limit exceeded", interval_sec=900)
     assert (delay, hint) == (900, "")
 
 
@@ -2803,11 +2805,44 @@ def test_the_outlook_says_what_gate_4_would_be_asked_to_read(review_repo: Path) 
     _git(review_repo, "add", "-A")
     _git(review_repo, "commit", "-qm", "add src and a committed binary")
 
-    view = review.outlook(repo_mod.Repo(review_repo), base=_git(review_repo, "rev-parse", "HEAD~1"))
+    view = review.outlook(repo_mod.Repo(review_repo), run_readers=False, base=_git(review_repo, "rev-parse", "HEAD~1"))
     assert view is not None
     assert view.unreadable == ("smoke.wav",), "one committed binary is what makes coverage insufficient"
     assert not view.over_budget
     assert "change under review:" in view.line() and "coverage insufficient" in view.line()
+
+
+def test_the_board_outlook_starts_no_reader_and_names_the_files_waiting_for_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dashboard polls the outlook. With readers declared it started a container for every file
+    one claims, on every tick, and a refusal was never remembered, so it started them again."""
+    config = make_config(
+        profiles={
+            "quality": {
+                "kind": "oci",
+                "containerfile": "python",
+                "image": "localhost/x@sha256:" + "a" * 64,
+                "network_profile": "none",
+            }
+        }
+    )
+    config["review_policy"]["file_readers"] = [{"name": "wav", "paths": ["*.wav"], "command": ["soxi"]}]
+    seed_repo(tmp_path, state=make_state(project="rv"), plan=make_plan(), config=config)
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "seed")
+    base = _git(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "smoke.wav").write_bytes(b"RIFF\x00\x01\x02\x03binary")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "a recording a reader reads")
+    monkeypatch.setattr(executors, "for_profile", lambda profile: pytest.fail("the board started a reader"))
+
+    view = review.outlook(repo_mod.Repo(tmp_path), run_readers=False, base=base)
+
+    assert view is not None
+    assert (view.unasked, view.unreadable) == (("smoke.wav",), ())
+    assert "1 file(s) not yet read by their file reader" in view.line()
 
 
 def test_the_readings_are_cut_from_the_graph_with_what_was_added_after_the_mandate(tmp_path: Path) -> None:
@@ -2841,7 +2876,7 @@ def test_the_readings_are_cut_from_the_graph_with_what_was_added_after_the_manda
     _git(tmp_path, "commit", "-qm", "both and the added path")
 
     repo = repo_mod.Repo(tmp_path)
-    view = review.outlook(repo, base=base)
+    view = review.outlook(repo, run_readers=False, base=base)
     assert view is not None
     assert (view.readings, view.unit) == (1, "T-001+T-002"), "one chain, and no seam: the added path is T-002's"
     graph = dag.load(repo)
@@ -2875,7 +2910,7 @@ def test_the_outlook_counts_only_the_readings_gate_4_will_take(tmp_path: Path) -
     _git(tmp_path, "commit", "-qm", "only alpha so far")
 
     repo = repo_mod.Repo(tmp_path)
-    view = review.outlook(repo, base=base)
+    view = review.outlook(repo, run_readers=False, base=base)
     assert view is not None
     assert view.unit == "T-001"
     plan = store_mod.Store(repo).read_plan()
@@ -2888,6 +2923,7 @@ def test_the_outlook_counts_only_the_readings_gate_4_will_take(tmp_path: Path) -
         exclude=review.not_the_product(repo, store_mod.Store(repo).read_state()),
         limits={"max_diff_bytes": 524_288},
         evidence=(),
+        file_readers=(),
     )
     assert view.readings == len(taken) == 1, "the board counts what the pipeline will take"
 

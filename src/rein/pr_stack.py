@@ -925,10 +925,7 @@ def _confirm_push(slices: Sequence[Slice], remote: str, *, base: str) -> None:
     pre-authorized, so this prompt cannot be configured away.
     """
     if not common.stdin_is_terminal():
-        raise PublishError(
-            "pushing and opening pull requests needs a confirmation typed at a terminal, and stdin "
-            "is not one. Run this in your shell — there is deliberately no flag that skips it."
-        )
+        raise PublishError(common.terminal_refusal("pushing and opening pull requests"))
     print(f"This will push {len(slices)} branch(es) to '{remote}' and open {len(slices)} DRAFT pull request(s):\n")
     print(render(slices, base=base))
     print(
@@ -1029,10 +1026,7 @@ def _confirm_ready(docs: Documents, slices: Sequence[Slice], records: Sequence[L
     to be looking at. If those are not what they approved, the answer is no.
     """
     if not common.stdin_is_terminal():
-        raise PublishError(
-            "lifting pull requests out of draft needs a confirmation typed at a terminal, and stdin "
-            "is not one. Run this in your shell — there is deliberately no flag that skips it."
-        )
+        raise PublishError(common.terminal_refusal("lifting pull requests out of draft"))
     receipt = docs.state.gate_receipt("acceptance") or {}
     print(f"the acceptance gate is approved: {receipt.get('approval_id', '(no approval id)')}\n")
     print("That approval covers:")

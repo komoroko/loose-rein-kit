@@ -4,6 +4,73 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.14.0] - 2026-10-11
+
+**A minor release: the format moves to `rein-grounded-v12`, and every repository needs `rein sync
+--force`.** `config.yaml` gains `review_policy.file_readers`, a generated `review.yaml`'s
+coverage records `read_files` and `file_readers` where it had `analyzers`, and a task's
+`handoff` in `state.yaml` gains `previous`. No `review.yaml` ever held `analyzers` (nothing passed
+one), so an existing review reads as it is. Six issues filed from one recorded cycle on 0.13.0,
+each fixed where it starts.
+
+- **A changed file the text analysis cannot read is read by a file reader, not exempted by where
+  it sits (#106).** Screenshots under a directory a criterion declared made coverage
+  `insufficient` on every build, and at high risk that blocked acceptance; the only exit was naming
+  each file at the mandate, before the run that names it. Exempting a declared directory is the
+  hole #79 closed (`dist/app.so` exempted with everything else), and accepting the gap by hand is
+  not open for a critical unknown. So the gap is closed by reading: `review_policy.file_readers`
+  declares, per kind of file, a deterministic command that runs in `quality_gate_profile` with
+  nothing mounted but the one committed file, and exits 0 only when it accounts for the whole of
+  it. The manifest names the reader beside every file it read, with the digest of its command and
+  image; a file no reader claims, or one its reader refuses, stays unread and the detail says which
+  reader refused it and why. Any kind of file, not only images.
+- A reader runs only in an `oci` profile, and two readers may not share a name; `config.yaml` is
+  refused otherwise, so the mandate cannot freeze it. On the host a parser would be handed bytes
+  the change chose, and a command naming a script in the repository would run whatever the change
+  made of it; in the container neither exists.
+- A reader's acceptance of a blob is cached in the evidence ledger; a refusal is asked again by the
+  next run, and once per blob within one. The board never starts a reader: a file one claims and
+  the ledger has no answer for is named as not read yet, and `rein doctor` reads it.
+- A ledger flush adds to the evidence file as it stands rather than writing back the copy it
+  loaded, so a reader's acceptance recorded during a build, or another process's facts, are no
+  longer erased by the build's own flush when it ends.
+- The unused `diff_facts.Analyzer` hook, which nothing ever passed and which never saw a binary,
+  is gone; file readers are what it was for.
+- The gate's and `doctor`'s remedy for unread files, and `/tasks`, name file readers beside a
+  criterion's exact `artifact` path. The acceptance screen lists what each reader read.
+- **The Reviews screen says what an edit will change, and what it still needs before it can be
+  applied.** An edit changed a lane and nothing else: what the record would say came only after the
+  write, and Apply stayed grey for want of a reason nobody said was required. A footer that stays
+  on screen now lists the changes in the words the chain will record (`POST /api/reviews/preview`,
+  the same `reviews_cmd.prepare` the write runs), refuses a draft the write would refuse, and asks
+  for the reason by name. A changed lane is marked. A review is added from a menu under each lane as
+  well as by dragging, which a keyboard, a touch screen and an editor's embedded browser cannot do,
+  and a read-only page says so at the top, with how to get write access.
+- **`rein build --supervise` waits for the reset the refusal named (#104).** The fix for #27
+  reached `rein review generate --supervise` only; the build's supervisor slept a fixed interval
+  because the run that returned `3` handed it nothing but the code. One recorded cycle made 51
+  refused launches. Both supervisors now use one delay, `faults.supervise_delay`.
+- **A report kept across a reset is never read as the next attempt's own (#105).** `rein task
+  reset` without `--fresh` keeps the handoff, and an attempt that ended without `rein report`
+  re-raised the previous attempt's `needs-revision` byte for byte, against a plan revised since.
+  A new attempt moves the last one's report and reviewer findings under `handoff.previous`, which
+  the next attempt's dossier hands over and nothing reads as the running attempt's own.
+- **A wait on a person is a stop, not a decision (#107).** `awaiting_operator` and
+  `awaiting_evidence` left the attention queue, where the board asked for "a disposition for each"
+  that nothing can record. The board recommends the owed work the build listed, then `rein build`,
+  until the build moves again, with any decision open beside it named too, and `rein observe`
+  counts every recorded wait rather than only an open one. The reason on the remaining attention
+  row says how a condition actually retires.
+- **A task reviewer's `question` survives its task landing, and is on the board while the build
+  runs (#108).** The write that marked a task `done` or `awaiting-evidence` dropped its whole
+  handoff, the reviewer's findings with it, so no question asked of a task that landed reached
+  acceptance. A landed task keeps its own attempt's `handoff.review`. The console prints each
+  non-blocking finding's anchor and statement, and each open question is an `attention` row naming
+  what answers it: acceptance, or `/revise` now.
+- **A confirmation refused for lack of a terminal names every route that works (#109).** One
+  sentence for the four verbs that ask: not through an agent's run-this-command prefix, or, where
+  the dashboard takes the same decision, where in `rein ui`.
+
 ## [0.13.0] - 2026-10-01
 
 **A minor release: the format moves to `rein-grounded-v11`, and every repository needs `rein sync

@@ -452,8 +452,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not common.stdin_is_terminal():
             logger.error(
-                "changing which reviews run needs a confirmation typed at a terminal, and stdin is not one. "
-                "Run this in your shell — there is deliberately no flag that skips it."
+                common.terminal_refusal("changing which reviews run", ui="change them in the Reviews view and Apply")
             )
             return 2
         if not args.reason.strip():

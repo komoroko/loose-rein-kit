@@ -875,6 +875,7 @@ def read_facts(
     exclude: Sequence[str],
     limits: Mapping[str, int],
     evidence: Sequence[str],
+    file_readers: Sequence[diff_facts.FileReader],
 ) -> ReadingFacts:
     """Measure one reading, refuse it if what it would send is over budget, then widen what is left.
 
@@ -887,8 +888,10 @@ def read_facts(
     """
     diff_text = diff_of(repo, base, head, exclude, include=reading.include)
     # `evidence` is the frozen plan's artifact paths: an unreadable file one of them covers is
-    # declared evidence, not a coverage gap (`diff_facts.build_coverage`).
-    facts = diff_facts.analyze(diff_text, evidence=evidence)
+    # declared evidence, not a coverage gap (`diff_facts.build_coverage`). `file_readers` are the
+    # whole change's: a reading's manifest is handed to its extractor and keyed into its cache, and
+    # one that called a file unread which the review's manifest names as read says two things.
+    facts = diff_facts.analyze(diff_text, file_readers=file_readers, evidence=evidence)
     # A deletion the detector matched a signal inside is sent whole (`fold_bodies`).
     signalled = frozenset(hit.path for hit in facts.signals)
     folded_plain = fold_bodies(diff_text, facts.files, signalled=signalled)
@@ -924,6 +927,7 @@ def take_readings(
     exclude: Sequence[str],
     limits: Mapping[str, int],
     evidence: Sequence[str],
+    file_readers: Sequence[diff_facts.FileReader],
 ) -> list[ReadingFacts]:
     """:func:`read_facts` for each reading, minus the slices this cycle did not touch.
 
@@ -937,7 +941,16 @@ def take_readings(
     and both takings have to be the same taking.
     """
     measures = [
-        read_facts(repo, reading=reading, base=base, head=head, exclude=exclude, limits=limits, evidence=evidence)
+        read_facts(
+            repo,
+            reading=reading,
+            base=base,
+            head=head,
+            exclude=exclude,
+            limits=limits,
+            evidence=evidence,
+            file_readers=file_readers,
+        )
         for reading in readings
     ]
     return [m for m in measures if m.reading.whole or m.facts.files]
@@ -1399,6 +1412,7 @@ def change_readings(
     exclude: Sequence[str],
     mode: str,
     ceiling: int,
+    file_readers: Sequence[diff_facts.FileReader],
 ) -> tuple[list[Reading], str, str]:
     """`(the readings the gate would take, the risk floor, the effective risk)` for the change at `head`.
 
@@ -1409,7 +1423,7 @@ def change_readings(
     """
     evidence = plan.artifact_paths if plan is not None else ()
     diff_text = diff_of(repo, base, head, exclude)
-    facts = diff_facts.analyze(diff_text, evidence=evidence)
+    facts = diff_facts.analyze(diff_text, file_readers=file_readers, evidence=evidence)
     effective = effective_risk(facts, plan)
     sent, _ = fold_bodies(diff_text, facts.files, signalled=frozenset(hit.path for hit in facts.signals))
     readings = plan_readings(
@@ -1712,6 +1726,7 @@ def warm(
     exclude: Sequence[str],
     limits: Mapping[str, int],
     evidence: Sequence[str],
+    file_readers: Sequence[diff_facts.FileReader],
     risk_floor: str,
     host_surface: str,
     config: models.Config | None,
@@ -1737,7 +1752,14 @@ def warm(
     a fact about the tree, not about this reading, and the caller already has the tree in hand.
     """
     measured = read_facts(
-        repo, reading=reading, base=base, head=head, exclude=exclude, limits=limits, evidence=evidence
+        repo,
+        reading=reading,
+        base=base,
+        head=head,
+        exclude=exclude,
+        limits=limits,
+        evidence=evidence,
+        file_readers=file_readers,
     )
     keys = keys_for(
         measured,

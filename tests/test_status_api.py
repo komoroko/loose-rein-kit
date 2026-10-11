@@ -106,6 +106,39 @@ def test_verify_must_clear_the_events_awaiting_a_decision() -> None:
     rec = decide(attention_count=2)
     assert rec.command == "rein events --summary"
     assert rec.kind == "resolve"
+    assert "disposition" not in rec.reason, "no verb records a disposition against a chain event"
+
+
+def test_a_wait_on_a_person_is_recommended_as_the_owed_work() -> None:
+    """#107: the board told the human to record a disposition for a wait, which nothing can record,
+    while the owed work that does end it went unrecommended."""
+    owed = "1 task(s) wait on something only a person can provide ... Provide them, then run `rein build` again"
+    rec = decide(owed=owed, attention_count=1)
+    assert (rec.command, rec.kind, rec.reason) == ("rein build", "provide", owed)
+    assert rec.also == ("rein events --summary",), "a decision waiting beside it is not hidden behind it"
+
+
+def test_the_board_recommends_an_open_wait_from_the_chain(tmp_path: Path) -> None:
+    from rein import event_chain
+
+    wait = event_chain.make(
+        "knowledge_gap",
+        "demo-cycle",
+        subject_ids=["T-001"],
+        detail={"kind": "awaiting_operator", "message": "commit labels.csv for T-001, then rein build"},
+    )
+    seed_repo(
+        tmp_path,
+        events=[event_chain.link(None, wait)],
+        state=make_state(tasks={"T-001": "todo"}),
+        config=make_config(profiles=SANDBOXED_PROFILES),
+    )
+    status = status_api.collect_status(repo_mod.Repo(tmp_path))
+    assert status["next"]["kind"] == "provide", status["next"]  # type: ignore[index]
+    assert "labels.csv" in status["next"]["reason"]  # type: ignore[index]
+    queue = status["pending"]
+    assert isinstance(queue, list)
+    assert not [item for item in queue if item["kind"] == "escalation"]
 
 
 def test_with_no_mandate_the_board_points_at_writing_one() -> None:
@@ -447,6 +480,16 @@ QUEUE_BASE: dict[str, Any] = dict(
     attention=[],
     task_rows=[],
 )
+
+
+def test_a_reviewers_question_is_on_the_board_while_the_build_runs() -> None:
+    """#108: a `question` was a count on the console and named first at acceptance, where answering
+    "the ticket is right" reopens a finished task. While the build runs it costs a `/revise`."""
+    question = {"task_id": "T-072", "severity": "question", "statement": "ids and counts, or counts only?"}
+    [row] = status_api.pending_queue(**{**QUEUE_BASE, "questions": [{**question, "anchor": "src/log.py:12"}]})
+    assert (row["severity"], row["kind"], row["subject"]) == ("attention", "question", "T-072")
+    assert "src/log.py:12" in row["headline"] and "ids and counts, or counts only?" in row["headline"]
+    assert "/revise" in row["action"]
 
 
 def test_the_queue_is_ordered_by_severity_not_by_discovery() -> None:

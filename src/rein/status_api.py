@@ -37,6 +37,7 @@ from typing import Any
 from rein import (
     adapters,
     agent_cli,
+    brief,
     common,
     dag,
     dag_trace,
@@ -75,7 +76,7 @@ class Recommendation:
     """The next action, as a copy-able command plus a one-sentence why."""
 
     command: str
-    kind: str  # run_phase | approve_gate | reconcile | resolve | setup | close | fix
+    kind: str  # run_phase | approve_gate | reconcile | resolve | provide | evidence | setup | close | fix
     reason: str
     also: tuple[str, ...] = ()
 
@@ -148,6 +149,8 @@ def next_action(
     baseline: str = "",
     blocked: Recommendation | None = None,
     scoped: Recommendation | None = None,
+    #: What the open wait on a person says is owed (`events.open_wait`), "" when nothing is.
+    owed: str = "",
 ) -> Recommendation:
     """The deterministic decision table (first match wins).
 
@@ -255,13 +258,19 @@ def next_action(
             "step you point it at.",
             also=("rein doctor",),
         )
+    # 5b. The build stopped because only a person can provide what comes next. A wait, not a
+    # decision: the recommendation is the owed work, as the loop listed it when it stopped (#107).
+    # A decision waiting at the same time is named beside it rather than hidden behind it.
+    if stage == "building" and owed:
+        beside = ("rein events --summary",) if attention_count else ()
+        return Recommendation(command="rein build", kind="provide", reason=owed, also=beside)
     # 6. Events awaiting a human decision block acceptance.
     if stage == "building" and attention_count:
         return Recommendation(
             command="rein events --summary",
             kind="resolve",
-            reason=f"{attention_count} condition(s) await a human decision; record a disposition for each "
-            "before the acceptance decision.",
+            reason=f"{attention_count} condition(s) await a human decision before the acceptance decision. "
+            "Each retires when what it names has moved on: the task done, the plan re-frozen, the review taken.",
         )
     # 7. Everything approved, and the approval not yet carried out: integrating it is the decision a
     # person already made, so finishing it asks nobody.
@@ -759,6 +768,7 @@ def pending_queue(
     unsandboxed_build_targets: Sequence[str],
     attention: Sequence[tuple[models.Event, int]],
     task_rows: Sequence[Mapping[str, object]],
+    questions: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, str]]:
     """Everything standing between this repository and its next gate, worst first.
 
@@ -836,6 +846,22 @@ def pending_queue(
                 _STUCK_TASK_ACTION[kind],
             )
         )
+    # A task reviewer's `question` is what only a person can settle — usually what the plan should
+    # have said. It stops nothing, and it used to be named first at acceptance, where answering
+    # "the ticket was right" reopens a finished task; while the build runs it costs a `/revise`
+    # (#108). Answered at acceptance's human review, it is gone with the cycle.
+    items += [
+        _pending_item(
+            "attention",
+            "question",
+            str(q["task_id"]),
+            f"{q['task_id']}'s reviewer asks"
+            + (f" about {q['anchor']}" if q.get("anchor") else "")
+            + f": {q['statement']}",
+            "answer it at acceptance, or `/revise` now if the plan is what is wrong",
+        )
+        for q in questions
+    ]
     # Warnings are deliberately absent: a warning is a diagnostic about reading the repository,
     # not a decision waiting in it, and it has its own section on every surface. The one that
     # would have mattered here — "readiness could not be probed" — is carried by `pending_deep`.
@@ -1050,6 +1076,7 @@ def collect_status(
     # The one rule for "what is still waiting", grouped once: the recommendation's count, the
     # queue's rows and `rein events --summary` all read this, so they cannot disagree.
     attention = events_mod.open_conditions(events, task_status)
+    wait = events_mod.open_wait(events, task_status)
 
     # The acceptance gate's blocking findings, split by who can act on each. Empty when there is no plan or no
     # generated review, which `repair.route` answers for itself — and when the graph is inconsistent,
@@ -1084,6 +1111,7 @@ def collect_status(
         gates=gates,
         counts=counts,
         attention_count=len(attention),
+        owed=str(wait.detail.get("message", "")) if wait is not None else "",
         chain_defects=len(defects),
         uninitialized=uninitialized,
         gate_chain_broken=bool(state.gate_chain_violations()) if state else False,
@@ -1126,7 +1154,8 @@ def collect_status(
     if stage == "building" and not template_mode:
         from rein import review as review_mod
 
-        view = review_mod.outlook(repo)
+        # No reader is started from here: the dashboard polls this (`review.outlook`).
+        view = review_mod.outlook(repo, run_readers=False)
         if view is not None:
             outlook = {
                 "line": view.line(),
@@ -1137,6 +1166,7 @@ def collect_status(
                 "ceiling": view.ceiling,
                 "over_budget": view.over_budget,
                 "unreadable": list(view.unreadable),
+                "unasked": list(view.unasked),
                 "coverage_blocks_gate": view.coverage_blocks_gate,
                 "made_of": view.made_of(),
                 "composition": dict(view.composition),
@@ -1158,6 +1188,9 @@ def collect_status(
         unsandboxed_build_targets=unsandboxed_build_targets,
         attention=attention,
         task_rows=task_rows if isinstance(task_rows, list) else [],
+        questions=[f for f in brief.residual_findings(state) if f["severity"] == "question"]
+        if stage == "building"
+        else [],
     )
 
     return {

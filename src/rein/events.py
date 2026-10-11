@@ -24,8 +24,10 @@ from rein import repo as repo_mod
 
 logger = logging.getLogger(__name__)
 
-#: Events that mean a human has to decide something. They are not "closed" here — a
-#: disposition is recorded in review.yaml and signed, not ticked off in a log.
+#: Events that mean a human has to decide something. They are not "closed" here: nothing ticks
+#: one off in a log. One retires when the chain or the task it names has moved past it
+#: (:func:`open_attention`), and a `knowledge_gap` that records a wait is not one of them at all
+#: (`WAIT_KINDS`).
 ATTENTION_EVENTS = frozenset(
     {
         "knowledge_gap",
@@ -72,10 +74,32 @@ def task_outcomes(events: Sequence[models.Event]) -> dict[str, str]:
     return outcomes
 
 
+#: The `knowledge_gap` kinds that record the work **waiting** on something only a person can
+#: provide, not a question somebody has to answer: what a person-produced task or an unmet
+#: `requires` owes (`awaiting_operator`), and an observation no loop can make (`awaiting_evidence`).
+#:
+#: Kept in the chain, because each is the one record that the work stopped for a person. Kept off
+#: the attention queue, because there is nothing to decide and no verb that records a decision: one
+#: retires when its tasks are done, and what moves it is the owed work. Queued as a condition, it
+#: had the board ask for "a disposition for each" that nothing could record, beside the blocker
+#: that already named the same unfinished task, and a wait whose subject set shrank as other
+#: person-tasks finished showed up as several rows (#107). The board names the owed work instead
+#: (:func:`open_wait`; the awaiting-evidence row reads the task statuses).
+WAIT_KINDS = frozenset({"awaiting_operator", "awaiting_evidence"})
+
+
+def is_wait(event: models.Event) -> bool:
+    """Is this the record of the work waiting on a person (`WAIT_KINDS`)?"""
+    detail = event.detail if isinstance(event.detail, Mapping) else {}
+    return event.event == "knowledge_gap" and detail.get("kind") in WAIT_KINDS
+
+
 def stops(events: Sequence[models.Event]) -> int:
     """How many times this chain says the work stopped and a human had to act.
 
-    The gate stops above, plus the conditions that actually reached a person —
+    The gate stops above, every recorded wait on a person (`WAIT_KINDS`, each one a run that
+    handed back or a task that landed owing an observation), plus the conditions that actually
+    reached a person —
     :func:`open_conditions` over this chain's own outcomes, so the *same* rule that decides what a
     board calls pending decides what this counts. It read raw `ATTENTION_EVENTS` before, with no
     retirement at all: a task that failed twice and passed on the third attempt was counted as a
@@ -86,8 +110,15 @@ def stops(events: Sequence[models.Event]) -> int:
     Never a ceiling: nothing reads this back to decide anything, which is the invariant that keeps
     a figure from becoming a budget (`observations.STOP_COUNT_CLAIM`).
     """
-    gates = sum(1 for e in events if e.event in GATE_STOP_EVENTS)
-    return gates + len(open_conditions(events, task_outcomes(events)))
+    return len(_stopped(events))
+
+
+def _stopped(events: Sequence[models.Event]) -> list[models.Event]:
+    """The one record of each stop :func:`stops` counts. Waits count when recorded, not while open:
+    a wait is ended by the person doing the owed work, which retires it, and counting it only while
+    open dropped every one of them from an archived cycle."""
+    stopped = [e for e in events if e.event in GATE_STOP_EVENTS or is_wait(e)]
+    return stopped + [e for e, _ in open_conditions(events, task_outcomes(events))]
 
 
 #: Why a stop reached a person, keyed by what the path that recorded it wrote down: the gate
@@ -157,9 +188,7 @@ def stop_causes(events: Sequence[models.Event]) -> dict[str, int]:
     `stops` gives.
     """
     causes: dict[str, int] = {}
-    stopped = [e for e in events if e.event in GATE_STOP_EVENTS]
-    stopped += [e for e, _ in open_conditions(events, task_outcomes(events))]
-    for event in stopped:
+    for event in _stopped(events):
         cause = stop_cause(event)
         causes[cause] = causes.get(cause, 0) + 1
     return causes
@@ -300,8 +329,35 @@ def open_attention(events: Sequence[models.Event], task_status: Mapping[str, str
     return [
         e
         for e in events
-        if e.event in ATTENTION_EVENTS and not _task_outcome_resolved(e, statuses) and not _superseded(e, latest_seq)
+        if e.event in ATTENTION_EVENTS
+        and not is_wait(e)
+        and not _task_outcome_resolved(e, statuses)
+        and not _superseded(e, latest_seq)
     ]
+
+
+def open_wait(events: Sequence[models.Event], task_status: Mapping[str, str] | None = None) -> models.Event | None:
+    """The newest `awaiting_operator` record while the build is still stopped on it; None otherwise.
+
+    The newest only: each one lists everything the rest of the plan owes at that moment
+    (`build_loop.owed_everywhere`), so an older one is a superset of a list that has since shrunk,
+    not a second wait.
+
+    **It ends when the build moves again**, which the chain says with a `task_started` after it,
+    or when every task it names is done. It is recorded only when nothing else can run, so a start
+    after it is the build past it. Waiting for its tasks alone kept it open for the rest of the
+    cycle: the list names every task in the plan that still owes something, the last of them
+    possibly tasks away, and until then the board said nothing else could run while the build ran,
+    ahead of every decision waiting on a person. If the build stops on what is still owed, it
+    records a new wait, and that one is the newest.
+    """
+    statuses = task_status or {}
+    started = max((e.seq for e in events if e.event == "task_started"), default=-1)
+    for event in reversed(events):
+        if is_wait(event) and event.detail.get("kind") == "awaiting_operator":
+            moved = started > event.seq or _task_outcome_resolved(event, statuses)
+            return None if moved else event
+    return None
 
 
 def open_conditions(
@@ -357,6 +413,9 @@ def render_summary(events: list[models.Event], task_status: Mapping[str, str] | 
     for e, seen in conditions:
         subjects = ", ".join(e.subject_ids) or "-"
         lines.append(f"  - #{e.seq} {e.event} ({subjects})" + (f" \u00d7{seen}" if seen > 1 else ""))
+    if (wait := open_wait(events, task_status)) is not None:
+        lines.append(f"- waiting on a person, not a decision: #{wait.seq} ({', '.join(wait.subject_ids)})")
+        lines.extend(f"  {line}" for line in str(wait.detail.get("message", "")).splitlines())
     return "\n".join(lines)
 
 

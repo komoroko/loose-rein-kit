@@ -26,6 +26,7 @@ Layer 2's enums and this module's vocabulary constants are two spellings of one 
 
 from __future__ import annotations
 
+import fnmatch
 import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -1916,6 +1917,19 @@ class Review:
 
 
 @dataclass(frozen=True)
+class FileReaderSpec:
+    """One `review_policy.file_readers` entry: which files it reads, and the command that reads one."""
+
+    name: str
+    paths: tuple[str, ...]
+    command: tuple[str, ...]
+
+    def claims(self, path: str) -> bool:
+        """Does one of its patterns match `path`? `*` crosses `/`, as `fnmatch` has it."""
+        return any(fnmatch.fnmatchcase(path, pattern) for pattern in self.paths)
+
+
+@dataclass(frozen=True)
 class ExecutorProfile:
     """One sandbox definition (plan §10.2)."""
 
@@ -2097,10 +2111,38 @@ class Config:
     @classmethod
     def parse(cls, text: str, *, what: str = "config.yaml") -> Config:
         document = strict_yaml.load_mapping(text, what=what)
-        errors = schema_errors(document, "config")
+        errors = schema_errors(document, "config") or cls(document).problems()
         if errors:
             raise DocumentError(what, errors)
         return cls(document)
+
+    def problems(self) -> list[str]:
+        """What the schema cannot say about a config it accepts. Empty when there is nothing.
+
+        A file reader is handed a file the change wrote, so it runs where nothing else of the
+        repository is: an `oci` profile, with only that file mounted (`file_readers`). On the host,
+        or in an agent sandbox with egress, the bytes the change chose would meet a parser outside
+        the boundary the quality gate's own commands are held to. Refused here, at the mandate that
+        freezes the file, rather than when acceptance first asks a reader.
+        """
+        readers = self.file_readers
+        if not readers:
+            return []
+        problems: list[str] = []
+        names = [reader.name for reader in readers]
+        if repeated := sorted({name for name in names if names.count(name) > 1}):
+            problems.append(
+                f"review_policy.file_readers names {', '.join(repeated)} more than once: the manifest "
+                "records each reader by name beside the files it read, so one name must be one command"
+            )
+        profile = self.quality_gate_profile
+        if profile is None or not profile.is_sandboxed:
+            where = "names no profile" if profile is None else f"is {profile.name!r}, of kind {profile.kind!r}"
+            problems.append(
+                f"review_policy.file_readers is declared, and executors.quality_gate_profile {where}: "
+                "a file reader runs only in an `oci` profile, with nothing but the file mounted"
+            )
+        return problems
 
     def frozen_digest(self) -> str:
         """The part of config.yaml the mandate's approval covers: everything but the image pins and
@@ -2359,6 +2401,27 @@ class Config:
         policy = self.raw.get("review_policy")
         value = policy.get("repair_rounds") if isinstance(policy, dict) else None
         return common.as_int(value, 2)
+
+    @property
+    def file_readers(self) -> tuple[FileReaderSpec, ...]:
+        """`review_policy.file_readers`, in the order declared — the first whose pattern matches is asked.
+
+        What makes a file the text analysis cannot read count as read: a deterministic command,
+        named in the manifest beside every file it accounted for (`diff_facts.build_coverage`).
+        """
+        policy = self.raw.get("review_policy")
+        entries = policy.get("file_readers") if isinstance(policy, dict) else None
+        if not isinstance(entries, list):
+            return ()
+        return tuple(
+            FileReaderSpec(
+                name=str(entry["name"]),
+                paths=tuple(str(p) for p in entry["paths"]),
+                command=tuple(str(c) for c in entry["command"]),
+            )
+            for entry in entries
+            if isinstance(entry, dict)
+        )
 
     @property
     def composition(self) -> str:

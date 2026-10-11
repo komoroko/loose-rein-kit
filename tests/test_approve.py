@@ -57,8 +57,13 @@ def test_there_is_no_force_and_no_by(capsys: pytest.CaptureFixture[str]) -> None
     assert "--by" not in helptext
 
 
-def test_the_cli_refuses_without_a_terminal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A piped stdin, a CI job, or an agent's captured subprocess must not approve by accident."""
+def test_the_cli_refuses_without_a_terminal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A piped stdin, a CI job, or an agent's captured subprocess must not approve by accident.
+
+    And the refusal names both routes that do open a gate (#109): someone who typed `! rein approve`
+    into an agent host believes they ran it in their shell, and the dashboard works from there."""
     repo = repo_at(
         tmp_path,
         state=make_state(gates=PENDING_ALL, plan_status="draft"),
@@ -66,6 +71,8 @@ def test_the_cli_refuses_without_a_terminal(monkeypatch: pytest.MonkeyPatch, tmp
     )
     monkeypatch.setattr("sys.stdin", io.StringIO("requirements\n"))  # readable, but not a terminal
     assert approve.main(["mandate", "--repo", str(tmp_path)]) == 1
+    assert "not through an agent's run-this-command prefix" in caplog.text
+    assert '"Approve gate mandate" button in `rein ui`' in caplog.text
 
     state = store_mod.Store(repo).read_state()
     assert state is not None and state.gate_status("mandate") == "pending"

@@ -155,7 +155,7 @@ def build(
     note = _handoff_note(handoff or {})
     if note:
         document["previous_attempt"] = note
-    review = (handoff or {}).get("review")
+    review = _previous_attempt(handoff or {}).get("review")
     if isinstance(review, Mapping) and review.get("findings"):
         # So the reviewer does not re-derive the objection it already made, and so the implementer
         # can see what was said about the work it is continuing.
@@ -353,7 +353,13 @@ def _handoff_note(handoff: Mapping[str, Any]) -> dict[str, Any]:
     for key in ("failed_step", "salvage_branch", "salvage_state"):
         if handoff.get(key):
             note[key] = handoff[key]
-    report = handoff.get("report")
+    report = _previous_attempt(handoff).get("report")
     if isinstance(report, Mapping) and report.get("outcome"):
         note["reported"] = {"outcome": report["outcome"], "summary": str(report.get("summary", ""))}
     return note
+
+
+def _previous_attempt(handoff: Mapping[str, Any]) -> Mapping[str, Any]:
+    """What the attempt before this one said about itself (`build_loop._begin_attempt`)."""
+    previous = handoff.get("previous")
+    return previous if isinstance(previous, Mapping) else {}

@@ -26,6 +26,7 @@ import pytest
 from rein import (
     actual_extraction,
     adapters,
+    brief,
     build_git,
     build_loop,
     build_prompts,
@@ -1780,6 +1781,8 @@ def test_supervise_retries_on_exit_retry_later_until_something_else(
         def __init__(self, config: object, dry_run: bool, repo: object) -> None:
             seen_dry_run.append(dry_run)
 
+        refusal = ""
+
         def run(self) -> int:
             return next(codes)
 
@@ -1790,6 +1793,42 @@ def test_supervise_retries_on_exit_retry_later_until_something_else(
     assert build_loop._supervise(config, repo, interval_sec=7) == common.EXIT_DONE
     assert slept == [7, 7]
     assert seen_dry_run == [False, False, False]  # --supervise never runs the loop read-only
+
+
+def test_supervise_waits_until_the_reset_the_refused_launch_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#104: the build supervisor slept a fixed interval against a named reset — T-064 was launched
+    fifteen times, every ~15 minutes, each refused with the same `resets 5:20am (Asia/Tokyo)`."""
+    root = build_repo(tmp_path)
+    repo = repo_mod.Repo(root)
+    config = build_loop.Config.load(repo)
+    codes = iter([common.EXIT_RETRY_LATER, common.EXIT_DONE])
+
+    class FakeOrchestrator:
+        def __init__(self, config: object, dry_run: bool, repo: object) -> None:
+            self.refusal = ""
+
+        def run(self) -> int:
+            self.refusal = "You've hit your session limit \u00b7 resets 5:20am (Asia/Tokyo)"
+            return next(codes)
+
+    monkeypatch.setattr(build_loop, "Orchestrator", FakeOrchestrator)
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", slept.append)
+
+    assert build_loop._supervise(config, repo, interval_sec=7) == common.EXIT_DONE
+    assert len(slept) == 1
+    assert 7 < slept[0] <= faults.MAX_SUPERVISE_SLEEP_SEC
+
+
+def test_an_aborted_run_hands_the_supervisor_what_the_cli_said(tmp_path: Path) -> None:
+    """The refusal reaches `_supervise` through the run that returned 3, and only a retryable one."""
+    loop = build_loop.Orchestrator(build_loop.Config.load(repo_mod.Repo(build_repo(tmp_path))), dry_run=True)
+    said = "You've hit your session limit \u00b7 resets 5:20am (Asia/Tokyo)"
+    transient = build_loop.EnvironmentFault(faults.Fault.ENV_TRANSIENT, where="T-001", rc=1, output=said)
+    assert loop._abort_run(transient) == common.EXIT_RETRY_LATER
+    assert loop.refusal == said
 
 
 @pytest.mark.parametrize("rc", [common.EXIT_DONE, common.EXIT_HUMAN_NEEDED, common.EXIT_CANNOT_PROCEED])
@@ -2395,6 +2434,97 @@ def test_an_implementer_that_said_needs_revision_parks_the_task_there_on_the_rep
 
     loop._run_task_to_done(_task(), str(tmp_path))
     assert loop._stops["T-001"] == "needs-revision"
+
+
+def _report(loop: build_loop.Orchestrator, outcome: str, at: str) -> None:
+    build_loop.update_task_handoff(
+        loop.repo,
+        "T-001",
+        {"report": {"outcome": outcome, "summary": f"{outcome} at {at}", "at": at}},
+        event="decision_declared",
+        detail={"kind": "test"},
+    )
+
+
+def _start_attempt(loop: build_loop.Orchestrator) -> None:
+    loop._set_status("T-001", "in-progress", new_attempt=True)
+
+
+def test_a_report_kept_across_a_reset_is_not_the_next_attempts_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#105: the previous attempt's `needs-revision`, kept by a reset that kept the handoff, was
+    re-raised verbatim by an attempt that never called `rein report`."""
+    loop = orchestrator(tmp_path)
+    _report(loop, "needs-revision", "2026-10-10T01:00:00Z")
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd: ([], "git diff work...T-001"))
+
+    _start_attempt(build_loop.Orchestrator(loop.config, dry_run=False, repo=loop.repo))
+    kind, message = loop._check_implementer_output(_task(), str(tmp_path))
+
+    assert kind == "no_implementation"
+    assert "never called `rein report`" in message
+
+
+def test_a_report_this_attempt_made_is_read(tmp_path: Path) -> None:
+    loop = orchestrator(tmp_path)
+    _report(loop, "needs-revision", "2026-10-10T01:00:00Z")
+    _start_attempt(loop)
+    _report(loop, "blocked", "2026-10-10T02:00:00Z")
+
+    assert loop._read_report(_task())["outcome"] == "blocked"
+    kind, _ = loop._check_implementer_output(_task(), str(tmp_path))
+    assert kind == "agent_blocked"
+
+
+_QUESTION = {"severity": "question", "statement": "the ticket says ids and counts, the design counts only"}
+_MUST_FIX = {"severity": "must_fix", "statement": "the retry loop never ends"}
+
+
+def test_the_next_attempt_is_handed_what_the_last_one_said_and_was_told(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dossier hands the previous attempt's report and its reviewer's findings to the next
+    launch. Dropping the findings when the attempt started (#108's first fix) took them out of the
+    dossier too, because the dossier is written after the task is put in-progress."""
+    loop = orchestrator(tmp_path)
+    _report(loop, "needs-revision", "2026-10-10T01:00:00Z")
+    build_loop.set_task_status(loop.repo, "T-001", "blocked", handoff={"review": {"findings": [_MUST_FIX]}})
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd: ([], ""))
+
+    _start_attempt(loop)
+    written = loop._write_dossier(_task(), str(tmp_path), "implementer")
+    document = json.loads((tmp_path / written).read_text(encoding="utf-8"))
+
+    assert document["review"] == {"findings": [_MUST_FIX]}
+    assert document["previous_attempt"]["reported"]["outcome"] == "needs-revision"
+    assert loop._read_report(_task()) == {}
+
+
+def test_a_question_the_reviewer_asked_survives_the_task_landing(tmp_path: Path) -> None:
+    """#108: the write that marked a task done dropped its whole handoff, the reviewer's findings
+    with it, so a `question` on a task that landed reached nobody — not even acceptance."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.set_task_status(repo, "T-001", "done", commit="a" * 40, handoff={"review": {"findings": [_QUESTION]}})
+
+    state = store_mod.Store(repo).read_state()
+    assert state is not None
+    [finding] = brief.residual_findings(state)
+    assert finding["statement"] == _QUESTION["statement"]
+    assert set(state.raw["tasks"]["T-001"]["handoff"]) == {"review", "updated_at"}
+
+
+def test_a_landing_carries_only_the_questions_asked_of_its_own_attempt(tmp_path: Path) -> None:
+    """The last attempt's were asked of a tree this landing replaced; carried on, they would land
+    stamped with this attempt's commit."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.set_task_status(repo, "T-001", "blocked", handoff={"review": {"findings": [_QUESTION]}})
+    build_loop.set_task_status(repo, "T-001", "in-progress", new_attempt=True)
+    build_loop.set_task_status(repo, "T-001", "done", commit="b" * 40)
+
+    state = store_mod.Store(repo).read_state()
+    assert brief.residual_findings(state) == []
+    assert state is not None and "handoff" not in state.raw["tasks"]["T-001"]
 
 
 def test_a_moved_tree_earns_the_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
