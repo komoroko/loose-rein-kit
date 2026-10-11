@@ -81,6 +81,7 @@ from rein import (
     evidence,
     executors,
     faults,
+    file_readers,
     gate_guard,
     human_review,
     lenses,
@@ -2662,16 +2663,18 @@ class Orchestrator:
             # One analysis of one whole diff answers all three: the floor the gate will key on,
             # whether the gate will compose at all, and which readings it will take.
             graph = self._load_graph()
-            readings, risk_floor, effective = review_reading.change_readings(
-                self.repo,
-                self._plan,
-                graph.tasks,
-                base=base,
-                head=head,
-                exclude=exclude,
-                mode=self.config.raw.composition,
-                ceiling=int(limits["max_diff_bytes"]),
-            )
+            with file_readers.opened(self.repo, self.config.raw, head) as declared:
+                readings, risk_floor, effective = review_reading.change_readings(
+                    self.repo,
+                    self._plan,
+                    graph.tasks,
+                    base=base,
+                    head=head,
+                    exclude=exclude,
+                    mode=self.config.raw.composition,
+                    ceiling=int(limits["max_diff_bytes"]),
+                    file_readers=declared,
+                )
             if models.risk_at_least(effective, "critical"):
                 self._warming_off = True
                 print(

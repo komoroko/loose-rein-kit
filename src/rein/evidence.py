@@ -59,6 +59,8 @@ MAX_ENTRIES = 2048
 #: task acceptance criterion's evidence command (phase 3).
 KIND_GATE_STEP = "gate_step"
 KIND_ACCEPTANCE = "acceptance"
+#: One declared reader having accounted for one blob (`readers.CommandReader`).
+KIND_READER = "reader"
 
 
 def fact_key(kind: str, subject: str, tool: Sequence[str]) -> str:

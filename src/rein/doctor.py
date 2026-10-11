@@ -1790,9 +1790,9 @@ def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
                 f"{len(view.unreadable)} binary/unsupported file(s) are tracked in the change under "
                 f"review, so coverage will be `insufficient`"
                 + (f" and at {view.effective_risk} risk that blocks acceptance" if view.coverage_blocks_gate else "")
-                + f": {named}. Remove them from the change (gitignore the smoke-test output), or — "
-                "for evidence an acceptance criterion needs — declare that file's own path as the "
-                "criterion's `artifact` while the mandate can still be edited.",
+                + f": {named}. Remove them from the change (gitignore the smoke-test output), or, while "
+                "the mandate can still be edited, have them read: declare a file reader for their kind "
+                "(`review_policy.file_readers`), or name one file's own path as a criterion's `artifact`.",
             )
         )
     return findings

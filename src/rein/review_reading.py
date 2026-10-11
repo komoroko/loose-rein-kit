@@ -1399,6 +1399,7 @@ def change_readings(
     exclude: Sequence[str],
     mode: str,
     ceiling: int,
+    file_readers: Sequence[diff_facts.FileReader] = (),
 ) -> tuple[list[Reading], str, str]:
     """`(the readings the gate would take, the risk floor, the effective risk)` for the change at `head`.
 
@@ -1409,7 +1410,7 @@ def change_readings(
     """
     evidence = plan.artifact_paths if plan is not None else ()
     diff_text = diff_of(repo, base, head, exclude)
-    facts = diff_facts.analyze(diff_text, evidence=evidence)
+    facts = diff_facts.analyze(diff_text, file_readers=file_readers, evidence=evidence)
     effective = effective_risk(facts, plan)
     sent, _ = fold_bodies(diff_text, facts.files, signalled=frozenset(hit.path for hit in facts.signals))
     readings = plan_readings(

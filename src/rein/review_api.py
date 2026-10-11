@@ -421,6 +421,7 @@ def _coverage_totals(review: models.Review) -> dict[str, object]:
             "unsupported_files": [],
             "generated_files": [],
             "evidence_files": [],
+            "read_files": [],
         }
     unsupported = [
         {
@@ -441,6 +442,10 @@ def _coverage_totals(review: models.Review) -> dict[str, object]:
         "unsupported_files": unsupported,
         "generated_files": sorted(set(generated)),
         "evidence_files": sorted({str(item.get("path", "")) for item in manifest.get("evidence_files", []) or []}),
+        "read_files": [
+            {"path": str(item.get("path", "")), "reader": str(item.get("reader", ""))}
+            for item in manifest.get("read_files", []) or []
+        ],
     }
 
 

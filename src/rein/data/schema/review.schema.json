@@ -548,7 +548,7 @@
                     ]
                   },
                   "detail": {
-                    "description": "Which extension, or which analyzer went missing. `reason` is the closed vocabulary a query can aggregate; this is what a human needs to act on it, since 'register an analyzer for .psd' is only actionable if something says .psd.",
+                    "description": "Which extension, or which reader refused it and why. `reason` is the closed vocabulary a query can aggregate; this is what a human needs to act on it, since 'declare a reader for .psd' is only actionable if something says .psd.",
                     "type": "string",
                     "maxLength": 500
                   }
@@ -592,6 +592,28 @@
                 }
               }
             },
+            "read_files": {
+              "description": "Files the text analysis could not read and a file reader declared in `config.yaml` (`review_policy.file_readers`) accounted for, each with the reader that did. Read, not exempted: a file no reader claims stays in `unsupported_files`.",
+              "type": "array",
+              "maxItems": 512,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "path",
+                  "reader"
+                ],
+                "properties": {
+                  "path": {
+                    "$ref": "#/$defs/repoPath"
+                  },
+                  "reader": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9_-]{0,31}$"
+                  }
+                }
+              }
+            },
             "languages": {
               "type": "object",
               "maxProperties": 64,
@@ -604,8 +626,8 @@
                 ]
               }
             },
-            "analyzers": {
-              "description": "External analyzer name -> the digest of the executable that answered, for every analyzer whose reading is counted in `analyzed_files`. A file counted as read with nobody named is a claim no one can check afterwards (out-of-scope 11).",
+            "file_readers": {
+              "description": "File reader name -> the digest of what answered (its command and the profile's image), for every reader named in `read_files`. A file counted as read with nobody named is a claim no one can check afterwards.",
               "type": "object",
               "maxProperties": 32,
               "additionalProperties": {

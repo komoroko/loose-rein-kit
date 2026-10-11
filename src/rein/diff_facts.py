@@ -416,24 +416,18 @@ _FILENAME_ANALYSIS: dict[str, tuple[str, str]] = {
     "Makefile": ("make", "token_only"),
 }
 
-#: What an analyzer may claim it did. `ast_plus_llm` is deliberately absent: the Coverage
-#: Manifest is the deterministic record of what was read, and a model's opinion does not belong
-#: in it whatever an adapter calls itself.
-ANALYZER_METHODS = frozenset({"ast", "token_only"})
 
+class FileReader(Protocol):
+    """A reader for a changed file the text analysis below cannot read (`review_policy.file_readers`).
 
-class AnalyzerUnavailable(RuntimeError):
-    """An analyzer could not answer. The file stays unsupported, and this says why."""
+    The exit a coverage gap had been missing. Splitting the scope never helps when the unreadable
+    file *is* the change, and exempting a file by where it sits says nothing about what it is: an
+    `artifact` directory once exempted every unreadable file under it, a compiled `dist/app.so`
+    included (#79). A reader settles what the file is, from its bytes, and is named in the manifest
+    beside it, because "read" with nobody named is a claim no one can check later.
 
-
-class Analyzer(Protocol):
-    """An external reader for file kinds this release cannot parse itself.
-
-    This is the second exit the out-of-scope register names for a coverage gap, beside splitting
-    the scope — and splitting never helps when the unreadable file *is* the change. An analyzer
-    extends `_LANGUAGE_ANALYSIS` from outside: same answer shape, same honesty rules, and the
-    digest of whatever produced it is recorded, because "analyzed" with nobody named is not a
-    claim anyone can check later.
+    Deterministic by contract. The manifest is the record of what was read, and a model's opinion
+    of a file is not that, whatever it is asked to say.
     """
 
     @property
@@ -442,8 +436,12 @@ class Analyzer(Protocol):
     @property
     def digest(self) -> str: ...
 
-    def analyze(self, path: str, content: str) -> tuple[str, str] | None:
-        """`(language, method)`, or None when this analyzer cannot read the file either."""
+    def claims(self, path: str) -> bool:
+        """Is `path` one of the files this reader reads?"""
+        ...
+
+    def read(self, path: str) -> str:
+        """ "" when it accounted for the whole file; otherwise why not, for the manifest."""
         ...
 
 
@@ -501,9 +499,11 @@ class CoverageManifest:
     languages: dict[str, str]
     binary_semantics_analyzed: bool
     coverage_status: str = field(default="")
-    #: analyzer name → the digest of the executable that answered, for every external analyzer
-    #: whose reading is counted above. Nobody named means nobody to check.
-    analyzers: dict[str, str] = field(default_factory=dict)
+    #: reader name → the digest of what answered, for every reader in `read_files`. Nobody named
+    #: means nobody to check.
+    file_readers: dict[str, str] = field(default_factory=dict)
+    #: Files a declared reader accounted for, each with its reader's name (`build_coverage`).
+    read_files: tuple[dict[str, str], ...] = ()
     #: Unreadable files the frozen plan declares as an `artifact` criterion's evidence. Named, and
     #: not a gap: nothing was meant to read them as code (`build_coverage`).
     evidence_files: tuple[dict[str, str], ...] = ()
@@ -525,8 +525,10 @@ class CoverageManifest:
             entry["generated_files"] = [dict(g) for g in self.generated_files]
         if self.evidence_files:
             entry["evidence_files"] = [dict(e) for e in self.evidence_files]
-        if self.analyzers:
-            entry["analyzers"] = dict(sorted(self.analyzers.items()))
+        if self.read_files:
+            entry["read_files"] = [dict(r) for r in self.read_files]
+        if self.file_readers:
+            entry["file_readers"] = dict(sorted(self.file_readers.items()))
         return entry
 
 
@@ -574,7 +576,7 @@ def _analysis_for(path: str, body: str = "") -> tuple[str, str] | None:
 
 
 def build_coverage(
-    diff_text: str, files: list[DiffFile], *, analyzers: Sequence[Analyzer] = (), evidence: Sequence[str] = ()
+    diff_text: str, files: list[DiffFile], *, file_readers: Sequence[FileReader] = (), evidence: Sequence[str] = ()
 ) -> CoverageManifest:
     """Analyze a diff and record honestly what could not be analyzed (plan §13.3).
 
@@ -590,11 +592,10 @@ def build_coverage(
     directory exists — not every unreadable file anybody later puts under it. A compiled binary
     in `dist/` is still unread code.
 
-    `analyzers` are external readers for file kinds this release cannot parse. They are asked
-    only about files the built-in table cannot place, they answer in the same `(language,
-    method)` shape, and every one whose answer is used is named with its executable digest.
-    An analyzer that fails, times out, or is not the binary the manifest pins does not degrade
-    the manifest: the file stays unsupported and the reason says which analyzer went missing.
+    `file_readers` are asked about every other file nothing here can read, binary or text, and the
+    first that claims a file answers for it (`FileReader`). A file one reads goes to `read_files` with
+    its name; one it refuses, or one no reader claims, stays in `unsupported_files`, and the detail
+    says which reader refused it and why.
     """
     diff_digest = digests.of_bytes(diff_text.encode("utf-8"))
     analyzed = 0
@@ -604,7 +605,8 @@ def build_coverage(
     named = {path.rstrip("/") for path in evidence}
     generated: list[dict[str, str]] = []
     languages: dict[str, str] = {}
-    used_analyzers: dict[str, str] = {}
+    read: list[dict[str, str]] = []
+    used_readers: dict[str, str] = {}
     has_binary = False
 
     for file in files:
@@ -629,27 +631,22 @@ def build_coverage(
         if _is_generated(file):
             generated.append({"path": file.path, "source_locator": ""})
             continue
-        is_evidence = file.path in named
-        if file.binary:
-            has_binary = True
-            if is_evidence:
-                declared.append({"path": file.path})
-            else:
-                unsupported.append({"path": file.path, "reason": "binary"})
-            continue
         # The diff's own lines, which are what a `token_only` reader would read. Already
-        # decoded — git marks a file it could not decode as binary, and that is handled above.
-        language_method = _analysis_for(file.path, "\n".join(file.changed_lines))
+        # decoded — git marks a file it could not decode as binary, and that has none.
+        language_method = None if file.binary else _analysis_for(file.path, "\n".join(file.changed_lines))
         if language_method is None:
-            language_method, detail = _ask_analyzers(analyzers, file, used_analyzers)
-        else:
-            detail = ""
-        if language_method is None and is_evidence:
-            declared.append({"path": file.path})
-            continue
-        if language_method is None:
-            entry = {"path": file.path, "reason": "unsupported_language"}
-            entry["detail"] = detail or f"no analyzer for {_extension(file.path) or 'a file with no extension'}"
+            reader, refused = _ask_readers(file_readers, file.path)
+            if reader is not None:
+                read.append({"path": file.path, "reader": reader.name})
+                used_readers[reader.name] = reader.digest
+                continue
+            if file.path in named:
+                has_binary = has_binary or file.binary
+                declared.append({"path": file.path})
+                continue
+            has_binary = has_binary or file.binary
+            entry = {"path": file.path, "reason": "binary" if file.binary else "unsupported_language"}
+            entry["detail"] = refused or f"no reader for {_extension(file.path) or 'a file with no extension'}"
             unsupported.append(entry)
             continue
         language, method = language_method
@@ -666,7 +663,8 @@ def build_coverage(
         generated_files=tuple(generated),
         languages=languages,
         binary_semantics_analyzed=not has_binary,
-        analyzers=used_analyzers,
+        file_readers=used_readers,
+        read_files=tuple(read),
         evidence_files=tuple(declared),
     )
     # Status is decided against the effective risk by review_policy; a manifest on its own
@@ -716,34 +714,19 @@ def _default_status(manifest: CoverageManifest) -> str:
     return "sufficient"
 
 
-def _ask_analyzers(
-    analyzers: Sequence[Analyzer], file: DiffFile, used: dict[str, str]
-) -> tuple[tuple[str, str] | None, str]:
-    """Offer one unreadable file to each analyzer in turn. `(answer, why-not)`.
+def _ask_readers(readers: Sequence[FileReader], path: str) -> tuple[FileReader | None, str]:
+    """`(the reader that read path, "")`, or `(None, why the one that claimed it refused)`.
 
-    Only the changed lines are handed over, because that is what the manifest is a statement
-    about, and it keeps the analyzer from needing the working tree. The first usable answer
-    wins and its analyzer is recorded; an analyzer that claims a method outside
-    `ANALYZER_METHODS` has not answered — `ast_plus_llm` cannot enter the deterministic record
-    by being asserted.
+    The first reader that claims the file is the one asked, and its refusal is the answer: a second
+    reader that would accept what the first one refused is a reader for a different kind of file,
+    and trying readers until one says yes is shopping for a verdict.
     """
-    content = "\n".join(file.changed_lines)
-    problems: list[str] = []
-    for analyzer in analyzers:
-        try:
-            verdict = analyzer.analyze(file.path, content)
-        except AnalyzerUnavailable as exc:
-            problems.append(f"{analyzer.name}: {exc}")
+    for reader in readers:
+        if not reader.claims(path):
             continue
-        if verdict is None:
-            continue
-        language, method = verdict
-        if method not in ANALYZER_METHODS:
-            problems.append(f"{analyzer.name}: claimed method {method!r}")
-            continue
-        used[analyzer.name] = analyzer.digest
-        return (language, method), ""
-    return None, "; ".join(problems)
+        refused = reader.read(path)
+        return (None, f"reader {reader.name} refused it: {refused}") if refused else (reader, "")
+    return None, ""
 
 
 def _is_generated(file: DiffFile) -> bool:
@@ -776,7 +759,7 @@ class DiffFacts:
         return models.max_risk([hit.risk for hit in self.signals])
 
 
-def analyze(diff_text: str, *, analyzers: Sequence[Analyzer] = (), evidence: Sequence[str] = ()) -> DiffFacts:
+def analyze(diff_text: str, *, file_readers: Sequence[FileReader] = (), evidence: Sequence[str] = ()) -> DiffFacts:
     """Parse, detect signals, and build the coverage manifest for one diff.
 
     `evidence` is the frozen plan's `artifact` paths; see `build_coverage`.
@@ -785,5 +768,5 @@ def analyze(diff_text: str, *, analyzers: Sequence[Analyzer] = (), evidence: Seq
     return DiffFacts(
         files=tuple(files),
         signals=tuple(detect_signals(files)),
-        coverage=build_coverage(diff_text, files, analyzers=analyzers, evidence=evidence),
+        coverage=build_coverage(diff_text, files, file_readers=file_readers, evidence=evidence),
     )

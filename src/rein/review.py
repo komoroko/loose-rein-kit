@@ -45,6 +45,7 @@ from rein import (
     digests,
     event_chain,
     faults,
+    file_readers,
     human_review,
     models,
     review_cache,
@@ -336,7 +337,14 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
         tasks = _effective_tasks(plan, state)
     except ReviewError:
         return None
-    facts = diff_facts.analyze(diff_text, evidence=plan.artifact_paths if plan is not None else ())
+    head = repo._git_rc("rev-parse", "HEAD")[1].strip()
+    try:
+        with file_readers.opened(repo, config, head) as declared:
+            facts = diff_facts.analyze(
+                diff_text, file_readers=declared, evidence=plan.artifact_paths if plan is not None else ()
+            )
+    except common.ReinError:
+        return None  # the same answer as a config it cannot read at all, above
     limits = {**human_review.DEFAULT_BUDGET, **(config.budgets if config is not None else {})}
     unreadable = [
         str(entry.get("path", "")) for entry in (*facts.coverage.unsupported_files, *facts.coverage.generated_files)
@@ -525,7 +533,8 @@ def generate(
         # split the scope — is not a move that exists at acceptance.
         whole_diff = review_reading.diff_of(repo, trusted_base, head, exclude)
         evidence = plan.artifact_paths if plan is not None else ()
-        facts = diff_facts.analyze(whole_diff, evidence=evidence)
+        with file_readers.opened(repo, config, head) as declared:
+            facts = diff_facts.analyze(whole_diff, file_readers=declared, evidence=evidence)
         effective = review_reading.effective_risk(facts, plan)
         changed = [f.path for f in facts.files]
 
