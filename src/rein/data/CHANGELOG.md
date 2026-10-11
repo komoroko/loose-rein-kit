@@ -9,7 +9,8 @@ new one). `pyproject.toml [project] version` is the single version source.
 **A minor release: the format moves to `rein-grounded-v12`, and every repository needs `rein sync
 --force`.** `config.yaml` gains `review_policy.file_readers`, and a generated `review.yaml`'s
 coverage records `read_files` and `file_readers` where it had `analyzers`. No `review.yaml` ever
-held `analyzers` (nothing passed one), so an existing review reads as it is.
+held `analyzers` (nothing passed one), so an existing review reads as it is. Six issues filed from
+one recorded cycle on 0.13.0, each fixed where it starts.
 
 - **A changed file the text analysis cannot read is read by a file reader, not exempted by where
   it sits (#106).** Screenshots under a directory a criterion declared made coverage
@@ -30,12 +31,6 @@ held `analyzers` (nothing passed one), so an existing review reads as it is.
   is gone; file readers are what it was for.
 - The gate's and `doctor`'s remedy for unread files, and `/tasks`, name file readers beside a
   criterion's exact `artifact` path. The acceptance screen lists what each reader read.
-
-## [0.13.1] - 2026-10-11
-
-**A patch release: the format stays `rein-grounded-v11`.** Five issues filed from one recorded
-cycle on 0.13.0, each fixed where it starts. Nothing to do on upgrade beyond `rein sync`.
-
 - **`rein build --supervise` waits for the reset the refusal named (#104).** The fix for #27
   reached `rein review generate --supervise` only; the build's supervisor slept a fixed interval
   because the run that returned `3` handed it nothing but the code. One recorded cycle made 51
