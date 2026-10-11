@@ -70,6 +70,17 @@ each fixed where it starts.
 - **A confirmation refused for lack of a terminal names every route that works (#109).** One
   sentence for the four verbs that ask: not through an agent's run-this-command prefix, or, where
   the dashboard takes the same decision, where in `rein ui`.
+- **A done task a roll back marked can be kept (#112).** `/tasks` told the reconcile after
+  `rein revise --impacted` to *keep* an unaffected task by restoring its former status, and for a
+  task that had been `done` nothing could: `rein task reset` refuses `done` on purpose, and a re-run
+  is stopped as `no_implementation` because the implementer has nothing to change. The task stayed
+  `needs-revision`, and acceptance stayed shut on "tasks not done". `rein task keep T-NNN --reason
+  "…"` restores the `done` the build already decided, recorded as `decision_declared` /
+  `task_kept`, and only while that decision still stands: the mark left `completed_commit` in
+  place (a task the build or a reset sent back has none and goes through `reset`), that commit is
+  in `HEAD`'s history, and the task differs from the one the last mandate approval froze by paths
+  added to an `artifact` criterion and nothing else, every one of them in `HEAD`. A path taken
+  off, or any other change to the task, is a question a run answers, and is refused.
 
 ## [0.13.0] - 2026-10-01
 

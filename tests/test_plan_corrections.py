@@ -9,11 +9,13 @@ person, who is shown what changed rather than the plan again.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from rein import approve, brief, dag, models, revise, task_cmd
+from rein import approve, brief, build_loop, dag, models, revise, task_cmd
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import make_config, make_plan, make_state, make_task, seed_repo
@@ -386,3 +388,143 @@ def test_a_roll_back_hands_added_scope_back_to_the_planner(tmp_path: Path) -> No
     revise.apply(repo, revision, "re-cut")
     state = store_mod.Store(repo).read_state()
     assert state is not None and state.task_scope_added == {}
+
+
+# --- keeping a done task a roll back marked (`rein task keep`, #112) ---------------------------
+
+
+def _done_then_marked(tmp_path: Path, *, extra: tuple[str, ...] = ("docs/shots/01.png",)) -> repo_mod.Repo:
+    """A task done under an approved mandate, then marked by `rein revise --to mandate --impacted`.
+
+    Its criterion names `docs/run.md`; `extra` are files committed beside it that the criterion
+    does not name yet — the screenshots #106 left unread.
+    """
+    criterion = {
+        "id": "A-1",
+        "statement": "the run is recorded",
+        "evidence": {"kind": "artifact", "paths": ["docs/run.md"]},
+    }
+    task = make_task("T-001", claim_ids=["C-001"], acceptance=[criterion], scope_include=["docs/"])
+    seed_repo(
+        tmp_path,
+        plan=make_plan(tasks=[task]),
+        state=make_state(gates={"mandate": "pending"}, plan_status="draft"),
+        git=True,
+    )
+    for rel in ("docs/run.md", *extra):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_bytes(b"recorded")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "the mandate as approved, and the task's work")
+    repo = repo_mod.Repo(tmp_path)
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    build_loop.set_task_status(repo, "T-001", "done", commit=head.stdout.strip())
+    revise.apply(repo, revise.plan_revision(repo, "mandate", ["T-001"]), "name the screenshots")
+    return repo
+
+
+def _edit_task(tmp_path: Path, edit: Callable[[dict[str, Any]], None]) -> None:
+    path = tmp_path / ".rein" / "plan.yaml"
+    raw = store_mod.Store(repo_mod.Repo(tmp_path)).read_raw("plan")
+    assert raw is not None
+    edit(raw["tasks"][0])
+    path.write_bytes(store_mod.dump_yaml(raw))
+
+
+def _name_the_screenshot(task: dict[str, Any]) -> None:
+    task["acceptance"][0]["evidence"]["paths"].append("docs/shots/01.png")
+
+
+def test_a_done_task_whose_criterion_only_gained_paths_is_kept(tmp_path: Path) -> None:
+    """The case #112 had no exit for: reset cannot reach `done`, and a re-run changes nothing."""
+    repo = _done_then_marked(tmp_path)
+    marked = store_mod.Store(repo).read_raw("state")["tasks"]["T-001"]  # type: ignore[index]
+    assert marked["status"] == "needs-revision"
+    _edit_task(tmp_path, _name_the_screenshot)
+
+    task_cmd.keep(repo, "T-001", reason="only the screenshots are named; the work is what it was")
+
+    kept = store_mod.Store(repo).read_raw("state")["tasks"]["T-001"]  # type: ignore[index]
+    assert kept == {**marked, "status": "done"}
+    recorded = store_mod.Store(repo).read_events()[-1]
+    assert recorded.event == "decision_declared" and recorded.subject_ids == ("T-001",)
+    assert recorded.detail == {
+        "kind": "task_kept",
+        "from": "needs-revision",
+        "to": "done",
+        "commit": marked["completed_commit"],
+        "reason": "only the screenshots are named; the work is what it was",
+    }
+
+
+def test_a_criterion_changed_beyond_its_artifact_paths_is_not_a_keep(tmp_path: Path) -> None:
+    repo = _done_then_marked(tmp_path)
+
+    def tighten(task: dict[str, Any]) -> None:
+        _name_the_screenshot(task)
+        task["acceptance"][0]["statement"] = "the run is recorded, twice"
+
+    _edit_task(tmp_path, tighten)
+    with pytest.raises(ValueError, match="acceptance"):
+        task_cmd.keep(repo, "T-001", reason="keep")
+    assert store_mod.Store(repo).read_raw("state")["tasks"]["T-001"]["status"] == "needs-revision"  # type: ignore[index]
+
+
+def test_a_scope_change_is_not_a_keep(tmp_path: Path) -> None:
+    repo = _done_then_marked(tmp_path)
+    _edit_task(tmp_path, lambda task: task["scope"]["include"].append("src/"))
+    with pytest.raises(ValueError, match="scope"):
+        task_cmd.keep(repo, "T-001", reason="keep")
+
+
+def test_a_path_taken_off_an_artifact_criterion_is_not_a_keep(tmp_path: Path) -> None:
+    """Only added paths are checked here; a path taken away loosens what the task was held to."""
+    repo = _done_then_marked(tmp_path)
+
+    def swap(task: dict[str, Any]) -> None:
+        task["acceptance"][0]["evidence"]["paths"] = ["docs/shots/01.png"]
+
+    _edit_task(tmp_path, swap)
+    with pytest.raises(ValueError, match="docs/run.md"):
+        task_cmd.keep(repo, "T-001", reason="keep")
+
+
+def test_an_artifact_path_head_does_not_have_is_not_a_keep(tmp_path: Path) -> None:
+    repo = _done_then_marked(tmp_path, extra=())
+    _edit_task(tmp_path, _name_the_screenshot)
+    with pytest.raises(ValueError, match="docs/shots/01.png"):
+        task_cmd.keep(repo, "T-001", reason="keep")
+
+
+def test_a_task_that_was_not_done_when_marked_is_sent_to_reset(tmp_path: Path) -> None:
+    repo = _repo(tmp_path, _tasks(), {"T-001": {"status": "todo"}})
+    revise.apply(repo, revise.plan_revision(repo, "mandate", ["T-001"]), "re-cut")
+    with pytest.raises(ValueError, match="rein task reset"):
+        task_cmd.keep(repo, "T-001", reason="keep")
+
+
+def test_a_task_the_build_sent_back_is_not_kept(tmp_path: Path) -> None:
+    """A build's needs-revision drops `completed_commit`; only a roll-back mark keeps it."""
+    repo = _repo(tmp_path, _tasks())
+    build_loop.set_task_status(repo, "T-001", "done", commit="a" * 40)
+    build_loop.set_task_status(repo, "T-001", "needs-revision")
+    with pytest.raises(ValueError, match="rein task reset"):
+        task_cmd.keep(repo, "T-001", reason="keep")
+
+
+def test_a_completed_commit_head_does_not_contain_is_not_a_keep(tmp_path: Path) -> None:
+    repo = _done_then_marked(tmp_path)
+    _edit_task(tmp_path, _name_the_screenshot)
+    _git(tmp_path, "checkout", "-q", "--orphan", "elsewhere")
+    _git(tmp_path, "commit", "-q", "-m", "a history without the task's commit")
+    with pytest.raises(ValueError, match="not in HEAD's history"):
+        task_cmd.keep(repo, "T-001", reason="keep")
+
+
+def test_keep_is_reachable_from_the_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _done_then_marked(tmp_path)
+    _edit_task(tmp_path, _name_the_screenshot)
+    assert task_cmd.main(["keep", "T-001", "--reason", "paths only", "--repo", str(tmp_path)]) == 0
+    assert "T-001: needs-revision → done" in capsys.readouterr().out
+    assert task_cmd.main(["keep", "T-001", "--reason", " ", "--repo", str(tmp_path)]) == 2
