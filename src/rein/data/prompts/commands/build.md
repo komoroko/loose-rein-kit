@@ -293,7 +293,10 @@ is the point; never fold them into the implementer's session.
   duplication between what two tasks added, one responsibility now in two places, an abstraction
   one task introduced that the next worked around. Its `must_fix` findings go to the integration
   fixer within the step's own budget; its `question` findings are filed against the merged task
-  whose scope owns the anchor and reach the human at the acceptance gate.
+  whose scope owns the anchor and reach the human at the acceptance gate. Every task review's
+  `question` is also on the board (`rein next`) from the moment the task lands: relay it to the
+  human while the build runs, because one about what the plan should say costs a `/revise` now and
+  a reopened task at acceptance.
 - **`stage:`** on any step says where it runs — `task`, `integration`, or `both` (the default).
   It moves *when* a step runs, never whether: a fast focused suite can guard each task while the
   whole one runs once over the join.

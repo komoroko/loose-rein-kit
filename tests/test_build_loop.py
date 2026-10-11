@@ -26,6 +26,7 @@ import pytest
 from rein import (
     actual_extraction,
     adapters,
+    brief,
     build_git,
     build_loop,
     build_prompts,
@@ -2470,6 +2471,32 @@ def test_a_report_this_attempt_made_is_read(tmp_path: Path) -> None:
     assert loop._read_report(_task())["outcome"] == "blocked"
     kind, _ = loop._check_implementer_output(_task(), str(tmp_path))
     assert kind == "agent_blocked"
+
+
+_QUESTION = {"severity": "question", "statement": "the ticket says ids and counts, the design counts only"}
+
+
+def test_a_question_the_reviewer_asked_survives_the_task_landing(tmp_path: Path) -> None:
+    """#108: the write that marked a task done dropped its whole handoff, the reviewer's findings
+    with it, so a `question` on a task that landed reached nobody — not even acceptance."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.set_task_status(repo, "T-001", "done", commit="a" * 40, handoff={"review": {"findings": [_QUESTION]}})
+
+    state = store_mod.Store(repo).read_state()
+    [finding] = brief.residual_findings(state)
+    assert finding["statement"] == _QUESTION["statement"]
+    assert set(state.raw["tasks"]["T-001"]["handoff"]) == {"review", "updated_at"}
+
+
+def test_a_new_attempt_drops_the_questions_asked_of_the_last_one(tmp_path: Path) -> None:
+    """They were asked of a tree the new attempt replaces; carried on, they would land stamped with
+    the new attempt's commit."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.set_task_status(repo, "T-001", "blocked", handoff={"review": {"findings": [_QUESTION]}})
+    build_loop.set_task_status(repo, "T-001", "in-progress", new_attempt=True)
+    build_loop.set_task_status(repo, "T-001", "done", commit="b" * 40)
+
+    assert brief.residual_findings(store_mod.Store(repo).read_state()) == []
 
 
 def test_a_moved_tree_earns_the_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

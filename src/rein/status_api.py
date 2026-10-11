@@ -37,6 +37,7 @@ from typing import Any
 from rein import (
     adapters,
     agent_cli,
+    brief,
     common,
     dag,
     dag_trace,
@@ -765,6 +766,7 @@ def pending_queue(
     unsandboxed_build_targets: Sequence[str],
     attention: Sequence[tuple[models.Event, int]],
     task_rows: Sequence[Mapping[str, object]],
+    questions: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, str]]:
     """Everything standing between this repository and its next gate, worst first.
 
@@ -842,6 +844,22 @@ def pending_queue(
                 _STUCK_TASK_ACTION[kind],
             )
         )
+    # A task reviewer's `question` is what only a person can settle — usually what the plan should
+    # have said. It stops nothing, and it used to be named first at acceptance, where answering
+    # "the ticket was right" reopens a finished task; while the build runs it costs a `/revise`
+    # (#108). Answered at acceptance's human review, it is gone with the cycle.
+    items += [
+        _pending_item(
+            "attention",
+            "question",
+            str(q["task_id"]),
+            f"{q['task_id']}'s reviewer asks"
+            + (f" about {q['anchor']}" if q.get("anchor") else "")
+            + f": {q['statement']}",
+            "answer it at acceptance, or `/revise` now if the plan is what is wrong",
+        )
+        for q in questions
+    ]
     # Warnings are deliberately absent: a warning is a diagnostic about reading the repository,
     # not a decision waiting in it, and it has its own section on every surface. The one that
     # would have mattered here — "readiness could not be probed" — is carried by `pending_deep`.
@@ -1166,6 +1184,9 @@ def collect_status(
         unsandboxed_build_targets=unsandboxed_build_targets,
         attention=attention,
         task_rows=task_rows if isinstance(task_rows, list) else [],
+        questions=[f for f in brief.residual_findings(state) if f["severity"] == "question"]
+        if stage == "building"
+        else [],
     )
 
     return {

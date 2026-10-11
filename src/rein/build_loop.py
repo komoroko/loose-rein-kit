@@ -496,6 +496,7 @@ def set_task_status(
     commit: str = "",
     evidence: Mapping[str, Any] | None = None,
     handoff: Mapping[str, Any] | None = None,
+    new_attempt: bool = False,
 ) -> None:
     """Write one task's status and the event that explains it, in one transaction.
 
@@ -513,6 +514,10 @@ def set_task_status(
     because a transaction here must record *why*, and "an agent produced some output" is not a
     reason a hash-chained log should carry a line for.
 
+    `handoff.review` is the one part a landed task keeps: its reviewer's findings, which
+    `brief.residual_findings` carries to acceptance. `new_attempt` drops the previous attempt's,
+    because those were made against a tree this attempt replaces.
+
     Retried on a lost race with a leaf writing its own task entry through the control plane.
     """
     if status not in models.TASK_STATUS_VALUES:
@@ -526,6 +531,7 @@ def set_task_status(
             commit=commit,
             evidence=evidence or {},
             handoff=handoff or {},
+            new_attempt=new_attempt,
         )
     )
 
@@ -565,6 +571,7 @@ def _set_task_status_once(
     commit: str,
     evidence: Mapping[str, Any],
     handoff: Mapping[str, Any],
+    new_attempt: bool,
 ) -> None:
     store = store_mod.Store(repo)
     state = store.read_state()
@@ -576,6 +583,8 @@ def _set_task_status_once(
     raw = json.loads(json.dumps(state.raw))
     tasks = raw.setdefault("tasks", {})
     entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
+    if new_attempt and isinstance(entry.get("handoff"), dict):
+        entry = {**entry, "handoff": {k: v for k, v in entry["handoff"].items() if k != "review"}}
     attempts = entry.get("attempts", 0) if isinstance(entry.get("attempts"), int) else 0
     if status == "in-progress":
         attempts += 1
@@ -585,7 +594,14 @@ def _set_task_status_once(
         # tree — and differ only in whether an observation nobody here could make is outstanding.
         # So both carry the record, and a promotion from one to the other keeps the one already
         # written rather than needing the run that established it to still be alive.
+        #
+        # The handoff goes, except its reviewer's findings: a `question` stops nothing by design
+        # and reaches a person only from here (`brief.residual_findings`). Dropping the whole
+        # handoff dropped every question a task that landed was asked (#108).
+        review = _merge_handoff(entry.get("handoff"), handoff).get("review")
         merged.pop("handoff", None)
+        if review:
+            merged["handoff"] = {"review": review, "updated_at": event_chain.now_iso()}
         previous = entry.get("evidence")
         carried: Mapping[str, Any] = evidence or (previous if isinstance(previous, dict) else {})
         merged["evidence"] = {**dict(carried), "updated_at": event_chain.now_iso()}
@@ -1230,7 +1246,7 @@ class Orchestrator:
         with self._evidence_lock:
             return self._pending_diagnostics.pop(task_id, {})
 
-    def _set_status(self, task_id: str, status: str, *, commit: str = "") -> None:
+    def _set_status(self, task_id: str, status: str, *, commit: str = "", new_attempt: bool = False) -> None:
         """Record a status, with the evidence and diagnostics this run holds for the task."""
         if self.dry_run:
             self._sim_status[task_id] = status
@@ -1243,6 +1259,7 @@ class Orchestrator:
             commit=commit,
             evidence=self._evidence.get(task_id, {}),
             handoff=self._take_diagnostics(task_id),
+            new_attempt=new_attempt,
         )
 
     # -- launching an agent (the machine's side of the boundary) --
@@ -2003,7 +2020,10 @@ class Orchestrator:
                 )
                 text = f"{text}\n{moved_line}" if text else moved_line
             if findings and not outstanding:
-                print(f"    [review] {task_id}: {len(findings)} finding(s), none blocking")
+                print(
+                    f"    [review] {task_id}: {len(findings)} finding(s), none blocking:\n"
+                    + dossier.render_findings(findings)
+                )
             answers[task_id] = ReviewAnswer(send_back=text)
         return answers
 
@@ -2847,7 +2867,7 @@ class Orchestrator:
         for task in tasks:
             report = self._handoff_for(task).get("report")
             self._inherited_report_at[task.id] = str(report.get("at", "")) if isinstance(report, dict) else ""
-            self._set_status(task.id, "in-progress")
+            self._set_status(task.id, "in-progress", new_attempt=True)
 
     def _read_report(self, task: dag.Task) -> dict[str, Any]:
         """What the implementer said about this attempt, through `rein report`. {} when it said nothing.
@@ -3528,9 +3548,12 @@ class Orchestrator:
             )
             outstanding = dossier.must_fix(findings)
             if not outstanding:
-                self._file_integration_findings(findings, tasks)
                 if findings:
-                    print(f"    [review] {ids}: {len(findings)} finding(s) about the join, none blocking")
+                    print(
+                        f"    [review] {ids}: {len(findings)} finding(s) about the join, none blocking:\n"
+                        + dossier.render_findings(findings)
+                    )
+                self._file_integration_findings(findings, tasks)
                 return
             if attempt == rounds:
                 raise StopLoop(
@@ -3563,7 +3586,7 @@ class Orchestrator:
             if owner:
                 self._add_review_findings(owner, [finding])
             else:
-                print(f"    [review] a finding about the join no task's scope owns: {finding.get('statement', '')}")
+                print(f"    [review] no task's scope owns {finding.get('anchor') or 'the finding with no anchor'}")
 
     # -- worktree / merge --
 

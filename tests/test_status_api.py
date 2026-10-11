@@ -479,6 +479,16 @@ QUEUE_BASE: dict[str, Any] = dict(
 )
 
 
+def test_a_reviewers_question_is_on_the_board_while_the_build_runs() -> None:
+    """#108: a `question` was a count on the console and named first at acceptance, where answering
+    "the ticket is right" reopens a finished task. While the build runs it costs a `/revise`."""
+    question = {"task_id": "T-072", "severity": "question", "statement": "ids and counts, or counts only?"}
+    [row] = status_api.pending_queue(**{**QUEUE_BASE, "questions": [{**question, "anchor": "src/log.py:12"}]})
+    assert (row["severity"], row["kind"], row["subject"]) == ("attention", "question", "T-072")
+    assert "src/log.py:12" in row["headline"] and "ids and counts, or counts only?" in row["headline"]
+    assert "/revise" in row["action"]
+
+
 def test_the_queue_is_ordered_by_severity_not_by_discovery() -> None:
     queue = status_api.pending_queue(
         **{
