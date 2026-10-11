@@ -84,12 +84,29 @@ def as_int(value: object, default: int = 0) -> int:
 def stdin_is_terminal() -> bool:
     """Whether stdin is an interactive terminal.
 
-    Kept here because two places need the same rule and a second copy is how one of them
-    eventually grows a flag that skips it. What the terminal establishes is not that a human
+    Kept here because every verb that asks a person to confirm needs the same rule, and a second
+    copy is how one of them eventually grows a flag that skips it. What the terminal establishes is not that a human
     answered but that a piped stdin, a CI job, or an agent's captured subprocess cannot answer
     by accident.
     """
     return sys.stdin.isatty()
+
+
+def terminal_refusal(what: str, *, ui: str = "") -> str:
+    """Why `what` was refused without a terminal on stdin, naming every route that does work.
+
+    One sentence for every verb that asks for a typed confirmation. "Run this in your shell" was
+    right and not enough: the usual way to land here is an agent host's run-this-command prefix
+    (Claude Code's `! rein approve mandate`), and a person who just did that believes they *did*
+    run it in their shell. Where the dashboard can take the same decision, `ui` names where (#109).
+    """
+    routes = "Run it in a terminal of your own, not through an agent's run-this-command prefix"
+    if ui:
+        routes += f", or {ui} in `rein ui`"
+    return (
+        f"{what} needs a confirmation typed at a terminal, and stdin is not one. {routes}. "
+        "There is deliberately no flag that skips it."
+    )
 
 
 def ask_yes_no(prompt: str) -> bool:
