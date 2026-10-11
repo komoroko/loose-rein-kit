@@ -591,6 +591,23 @@ table.lens-grid td.mono { font-size: .8rem; }
 .palette { margin: .6rem 0 0; }
 .palette .chip[draggable="true"] { cursor: grab; padding: .1rem .5rem; }
 [data-accepts="yes"] { outline: 2px dashed var(--brass); outline-offset: 2px; background: var(--brass-soft); }
+/* A lane the draft changed: brass, because a person has an unapplied change to act on. */
+.lane[data-changed="yes"] { border-top-color: var(--brass); }
+.lane-mark { color: var(--brass); text-transform: none; letter-spacing: 0; }
+.lane-add { margin-top: .5rem; max-width: 100%; font: inherit; font-size: .78rem; }
+/* What applying the draft would change, held at the foot of the viewport while lanes are edited:
+   the edit and its consequence stay on one screen, however far the custom reviews push the page. */
+.pending {
+  position: sticky; bottom: 0; z-index: 4; margin-top: 1.2rem; padding: .7rem 0 .8rem;
+  background: var(--paper); border-top: 1px solid var(--rule-2);
+}
+.pending[data-dirty="yes"] { border-top: 2px solid var(--brass); }
+.pending-head { font-size: .82rem; font-weight: 700; }
+.pending-list { margin: .35rem 0 .6rem; padding-left: 1.1rem; font-size: .82rem; }
+.pending-list li { margin: .1rem 0; }
+.pending-reason { display: flex; flex-direction: column; gap: .3rem; font-size: .78rem; color: var(--ink-2); max-width: 48rem; }
+.pending-reason input { font: inherit; font-size: .85rem; color: var(--ink); }
+.pending-actions { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-top: .55rem; }
 .rcard-head { display: flex; align-items: center; gap: .3rem; }
 .rcard-row { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; margin-top: .4rem; }
 .rcard-row input[type="number"] { width: 3.2rem; }

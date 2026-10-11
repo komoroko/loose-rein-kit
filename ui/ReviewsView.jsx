@@ -77,18 +77,24 @@ function dropZone({ accepts, dragging, onDrop }) {
   };
 }
 
-function Lane({ name, switches, stage, dragging, onChange }) {
+function Lane({ name, switches, stage, palette, changed, dragging, onChange }) {
   const reviews = stage.reviews || [];
   // A stage's own review is switched, not added: the adversarial review of a document is the one
   // a drafting lane runs whether or not anything is added to it.
   const accepts = (review) => !switches.includes(review) && !reviews.includes(review);
+  const add = (review) => onChange({ ...stage, reviews: [...reviews, review] });
+  const addable = palette.filter(accepts);
   return (
     <section
       className="lane"
       data-lane={name}
-      {...dropZone({ accepts, dragging, onDrop: (review) => onChange({ ...stage, reviews: [...reviews, review] }) })}
+      data-changed={changed ? "yes" : undefined}
+      {...dropZone({ accepts, dragging, onDrop: add })}
     >
-      <h3>{STAGE_LABEL[name] || name}</h3>
+      <h3>
+        {STAGE_LABEL[name] || name}
+        {changed ? <span className="lane-mark"> · changed</span> : null}
+      </h3>
       <p className="note">reads {READS[name] || name}</p>
       {switches.map((sw) => (
         <label className="rcard toggle" key={sw} data-switch={sw}>
@@ -128,7 +134,25 @@ function Lane({ name, switches, stage, dragging, onChange }) {
           </li>
         ))}
       </ul>
-      {reviews.length ? null : <p className="note">no review added — drag one here</p>}
+      {reviews.length ? null : <p className="note">no review added</p>}
+      {/* Dragging is one way in, not the only one: a keyboard, a touch screen and an editor's
+          embedded browser cannot drag, and a screen only a mouse can edit is one some people
+          cannot apply a change from. */}
+      {READ_ONLY || !addable.length ? null : (
+        <select
+          className="lane-add"
+          aria-label={`add a review to ${name}`}
+          value=""
+          onChange={(e) => e.target.value && add(e.target.value)}
+        >
+          <option value="">add a review…</option>
+          {addable.map((review) => (
+            <option key={review} value={review}>
+              {review}
+            </option>
+          ))}
+        </select>
+      )}
     </section>
   );
 }
@@ -140,6 +164,9 @@ export default function ReviewsView() {
   const [custom, setCustom] = useState({ name: "", question: "" });
   const [dragging, setDragging] = useState(null);
   const [reload, setReload] = useState(0);
+  // What applying a draft would change, in the chain's own words, or why it cannot be applied —
+  // kept with the draft it answers, so an answer about an older draft is never shown as this one's.
+  const [answered, setAnswered] = useState(null);
 
   useEffect(() => {
     let live = true;
@@ -153,13 +180,36 @@ export default function ReviewsView() {
     };
   }, [reload]);
 
+  const asked = draft ? JSON.stringify(draft) : "";
+  const dirty = Boolean(loaded && draft) && JSON.stringify(loaded.document) !== asked;
+  const preview = answered && answered.draft === asked ? answered : null;
+
+  // Asked of the server, not worked out here: `reviews_cmd.prepare` is what the write runs, so the
+  // list under Apply is the list the record will hold, and a draft it would refuse is refused now.
+  useEffect(() => {
+    if (!dirty || READ_ONLY) return undefined;
+    let live = true;
+    const timer = setTimeout(() => {
+      postJson("/api/reviews/preview", { document: JSON.parse(asked) }).then(
+        ({ data }) =>
+          live && setAnswered(data.error ? { draft: asked, error: data.error } : { draft: asked, changes: data.changes }),
+        () => live && setAnswered({ draft: asked, error: "The dashboard did not answer. Is `rein ui` still running?" }),
+      );
+    }, 200);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [asked, dirty]);
+
   if (!loaded) return <Empty>loading…</Empty>;
   if (loaded.error) return <Warn>{loaded.error}</Warn>;
   if (!draft) return <Warn>This repository has no .rein/reviews.yaml — `rein sync` writes the packaged one.</Warn>;
 
   const customs = draft.custom || [];
   const palette = [...loaded.builtin, ...customs.map((c) => c.name)];
-  const dirty = JSON.stringify(loaded.document) !== JSON.stringify(draft);
+  const laneChanged = (name) => JSON.stringify(loaded.document[name]) !== JSON.stringify(draft[name]);
+  const blocked = !preview || Boolean(preview.error);
   const removeCustom = (name) => {
     // A review taken out of the document is taken off every lane that read for it.
     const next = { ...draft };
@@ -180,7 +230,7 @@ export default function ReviewsView() {
       if (status === 409) setReload((n) => n + 1);
       return;
     }
-    toast(data.changes.length ? data.changes.join(" · ") : "nothing changed", "ok");
+    toast(data.changes.length ? `Applied: ${data.changes.join("; ")}` : "nothing changed", "ok");
     setReason("");
     setReload((n) => n + 1);
   };
@@ -189,8 +239,16 @@ export default function ReviewsView() {
     <div className="view" id="view-reviews" onDragEnd={() => setDragging(null)}>
       <div className="block">
         <h2>Reviews</h2>
+        {READ_ONLY ? (
+          <Warn>
+            This page is read-only, so nothing here can be changed or applied. Open the dashboard through the
+            launch link <code>rein ui</code> printed in its terminal; that link is what grants this browser write
+            access.
+          </Warn>
+        ) : null}
         <p className="note">
-          Which reviews run. Drag a review onto a lane and it reads what that lane reads; × takes it off. What
+          Which reviews run. Drag a review onto a lane, or pick one under the lane, and it reads what that lane reads;
+          × takes it off. What
           belongs to one stage alone is switched in place. None is required, and what is not read is named where it
           is decided on. Outside the mandate&apos;s freeze: a change here rewinds nothing, applies from the next
           reading, and is recorded with your reason.
@@ -218,6 +276,8 @@ export default function ReviewsView() {
               name={name}
               switches={switches}
               stage={draft[name] || { reviews: [] }}
+              palette={palette}
+              changed={laneChanged(name)}
               dragging={dragging}
               onChange={(next) => setDraft({ ...draft, [name]: next })}
             />
@@ -278,27 +338,44 @@ export default function ReviewsView() {
           </div>
         )}
 
-        <div className="approvebar">
-          {READ_ONLY ? (
-            <span className="note">Read-only page. Open the launch link `rein ui` printed to change this.</span>
-          ) : (
-            <>
-              <input
-                className="grow"
-                placeholder="why — recorded in the audit chain, shown at acceptance"
-                aria-label="reason"
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-              />
-              <button className="primary" disabled={!dirty || !reason.trim()} onClick={apply}>
-                Apply
-              </button>
-              <button disabled={!dirty} onClick={() => setDraft(JSON.parse(JSON.stringify(loaded.document)))}>
-                Discard
-              </button>
-            </>
-          )}
-        </div>
+        {READ_ONLY ? null : (
+          <div className="pending" data-dirty={dirty ? "yes" : undefined} aria-live="polite">
+            {dirty ? (
+              <>
+                <div className="pending-head">Not applied yet</div>
+                {preview === null ? (
+                  <p className="note">checking what this changes…</p>
+                ) : preview.error ? (
+                  <Warn>{preview.error}</Warn>
+                ) : (
+                  <ul className="pending-list">
+                    {preview.changes.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                )}
+                <label className="pending-reason">
+                  Reason, required. It is recorded in the audit chain and shown at acceptance.
+                  <input
+                    aria-label="reason"
+                    placeholder="why this changes which reviews run"
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value)}
+                  />
+                </label>
+                <div className="pending-actions">
+                  <button className="primary" disabled={blocked || !reason.trim()} onClick={apply}>
+                    Apply
+                  </button>
+                  <button onClick={() => setDraft(JSON.parse(JSON.stringify(loaded.document)))}>Discard</button>
+                  {!blocked && !reason.trim() ? <span className="note">Write a reason to apply.</span> : null}
+                </div>
+              </>
+            ) : (
+              <p className="note">No changes. Edit a lane or a custom review, and what it changes appears here.</p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

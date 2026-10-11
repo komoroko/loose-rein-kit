@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { baseRoutes, boot } from "./_harness.mjs";
+import { baseRoutes, boot, withStatus } from "./_harness.mjs";
 
 const DOCUMENT = {
   requirements: { adversarial: true, reviews: [] },
@@ -27,12 +27,18 @@ const PAYLOAD = {
   ],
 };
 
-async function reviewsScreen({ readOnly = false } = {}) {
+async function reviewsScreen({ readOnly = false, preview = () => ({ changes: ["build: no longer reads for simplification"] }) } = {}) {
   const posts = [];
+  const previews = [];
   const app = await boot({
     hash: "#reviews",
     readOnly,
     routes: baseRoutes((url, options) => {
+      if (url === "/api/reviews/preview") {
+        const asked = JSON.parse(options.body);
+        previews.push(asked);
+        return preview(asked.document);
+      }
       if (url !== "/api/reviews") return undefined;
       if (options?.method === "POST") {
         posts.push(JSON.parse(options.body));
@@ -42,10 +48,21 @@ async function reviewsScreen({ readOnly = false } = {}) {
     }),
   });
   await app.open();
-  return { app, posts };
+  return { app, posts, previews };
+}
+
+// The preview is asked a moment after the last edit, so a burst of edits asks once.
+async function previewed(app) {
+  const doc = app.window.document;
+  for (let i = 0; i < 40; i++) {
+    if (doc.querySelector(".pending-list, .pending .warn")) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.fail("no preview of the draft appeared");
 }
 
 async function applyWith(app, reason) {
+  await previewed(app);
   await app.type('input[aria-label="reason"]', reason);
   await app.click({ text: "Apply" });
 }
@@ -152,9 +169,49 @@ test("a custom review joins the palette, and deleting it takes it off every lane
   assert.deepEqual(posts[0].document.acceptance.reviews, []);
 });
 
+test("an edit says what it will change before it is applied, and why Apply waits", async () => {
+  const { app, previews } = await reviewsScreen();
+  const doc = app.window.document;
+  assert.match(doc.querySelector(".pending").textContent, /No changes/);
+  await app.click('button[aria-label="remove simplification from build"]');
+  await previewed(app);
+
+  assert.deepEqual(
+    [...doc.querySelectorAll(".pending-list li")].map((li) => li.textContent),
+    ["build: no longer reads for simplification"],
+    "in the words the record will hold, asked of the server",
+  );
+  assert.deepEqual(previews.at(-1).document.build.reviews, ["correctness"]);
+  assert.equal(doc.querySelector(`${LANE("build")}`).dataset.changed, "yes");
+  assert.ok(byText(doc, "Apply").disabled);
+  assert.match(doc.querySelector(".pending").textContent, /Write a reason to apply/);
+});
+
+test("a draft the server would refuse says why, and cannot be applied", async () => {
+  const { app } = await reviewsScreen({ preview: () => withStatus(400, { error: "comparison needs the extraction" }) });
+  const doc = app.window.document;
+  await app.click(TOGGLE("design", "adversarial review"));
+  await previewed(app);
+  assert.match(doc.querySelector(".pending .warn").textContent, /comparison needs the extraction/);
+  await app.type('input[aria-label="reason"]', "any");
+  assert.ok(byText(doc, "Apply").disabled);
+});
+
+test("a review is added to a lane without dragging", async () => {
+  const { app, posts } = await reviewsScreen();
+  const doc = app.window.document;
+  const options = [...doc.querySelectorAll(`${LANE("build")} select option`)].map((o) => o.value).filter(Boolean);
+  assert.deepEqual(options, ["adversarial", "security"], "only what the lane does not already read");
+  await app.select(`${LANE("build")} select[aria-label="add a review to build"]`, "security");
+  await applyWith(app, "security per task");
+  assert.deepEqual(posts[0].document.build.reviews, ["correctness", "simplification", "security"]);
+});
+
 test("a read-only page shows the lanes, drags nothing and changes nothing", async () => {
   const { app } = await reviewsScreen({ readOnly: true });
   const doc = app.window.document;
+  assert.match(doc.querySelector("#view-reviews .warn").textContent, /read-only, so nothing here can be changed/);
+  assert.equal(doc.querySelector(".pending"), null);
   assert.ok(doc.querySelector(`${LANE("build")} .chip[data-review="correctness"]`));
   assert.equal(byText(doc, "Apply"), null);
   assert.ok([...doc.querySelectorAll(".palette .chip")].every((chip) => chip.getAttribute("draggable") === "false"));

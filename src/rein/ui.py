@@ -757,6 +757,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._select_project(self._post_body())
             elif self.path == "/api/reviews":
                 self._apply_reviews(self._post_body())
+            elif self.path == "/api/reviews/preview":
+                self._preview_reviews(self._post_body())
             elif self.path.startswith("/api/review/"):
                 self._review_post(self.path[len("/api/review/") :], self._post_body())
             else:
@@ -831,6 +833,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 ],
             },
         )
+
+    def _preview_reviews(self, body: dict[str, object]) -> None:
+        """What applying this draft would change, in the words the chain will record — or why it cannot.
+
+        The screen used to show nothing between an edit and its write: a lane changed shape, the
+        Apply button stayed grey for want of a reason nobody said was required, and what the record
+        would say was learned only after it was written. The same `reviews_cmd.prepare` the write
+        runs, so the preview and the record cannot word one change two ways. Writes nothing.
+        """
+        document = body.get("document")
+        if not isinstance(document, dict):
+            raise UiActionError(HTTPStatus.BAD_REQUEST, "`document` must be the whole reviews document")
+        try:
+            proposal = reviews_cmd.prepare(repo_mod.Repo(self.server.active_root()), document)
+        except (reviews_cmd.ReviewsError, models.DocumentError, store_mod.StoreError) as exc:
+            raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None
+        self._send_json(HTTPStatus.OK, {"changes": proposal.changes})
 
     def _apply_reviews(self, body: dict[str, object]) -> None:
         """Replace reviews.yaml with the document the human assembled on the screen.

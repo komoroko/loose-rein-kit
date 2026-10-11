@@ -1438,6 +1438,28 @@ def test_a_reviews_change_from_the_screen_lands_with_its_reason(server: ui.Dashb
     assert changed.actor == "ui-session" and changed.detail["reason"] == "a one-line fix"
 
 
+def test_a_reviews_draft_is_previewed_in_the_records_words_and_nothing_is_written(
+    server: ui.DashboardServer, repo: Path
+) -> None:
+    """The screen showed nothing between an edit and its write, and a grey Apply said nothing about why."""
+    before = (repo / ".rein" / "reviews.yaml").read_bytes()
+    status, raw = write(server, "/api/reviews/preview", {"document": _with_design(False)})
+    assert status == 200, raw
+    assert json.loads(raw)["changes"] == ["adversarial review at design: OFF"]
+    assert (repo / ".rein" / "reviews.yaml").read_bytes() == before
+
+    refused = make_reviews()
+    refused["acceptance"]["comparison"] = True
+    refused["acceptance"]["actual_extraction"] = False
+    status, raw = write(server, "/api/reviews/preview", {"document": refused})
+    assert status == 400 and "comparison" in json.loads(raw)["error"]
+
+
+def test_a_reviews_preview_still_needs_the_session(server: ui.DashboardServer) -> None:
+    body: dict[str, object] = {"document": _with_design(False)}
+    assert _request(server, "POST", "/api/reviews/preview", body, token=server.token)[0] == 403
+
+
 def test_a_reviews_change_made_on_a_stale_screen_is_a_conflict(server: ui.DashboardServer) -> None:
     """Two screens, or a screen and a terminal: the second write used to undo the first in silence."""
     served = _served_digest(server)

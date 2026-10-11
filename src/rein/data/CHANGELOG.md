@@ -31,6 +31,14 @@ one recorded cycle on 0.13.0, each fixed where it starts.
   is gone; file readers are what it was for.
 - The gate's and `doctor`'s remedy for unread files, and `/tasks`, name file readers beside a
   criterion's exact `artifact` path. The acceptance screen lists what each reader read.
+- **The Reviews screen says what an edit will change, and what it still needs before it can be
+  applied.** An edit changed a lane and nothing else: what the record would say came only after the
+  write, and Apply stayed grey for want of a reason nobody said was required. A footer that stays
+  on screen now lists the changes in the words the chain will record (`POST /api/reviews/preview`,
+  the same `reviews_cmd.prepare` the write runs), refuses a draft the write would refuse, and asks
+  for the reason by name. A changed lane is marked. A review is added from a menu under each lane as
+  well as by dragging, which a keyboard, a touch screen and an editor's embedded browser cannot do,
+  and a read-only page says so at the top, with how to get write access.
 - **`rein build --supervise` waits for the reset the refusal named (#104).** The fix for #27
   reached `rein review generate --supervise` only; the build's supervisor slept a fixed interval
   because the run that returned `3` handed it nothing but the code. One recorded cycle made 51
