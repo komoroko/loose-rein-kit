@@ -337,16 +337,26 @@ def open_attention(events: Sequence[models.Event], task_status: Mapping[str, str
 
 
 def open_wait(events: Sequence[models.Event], task_status: Mapping[str, str] | None = None) -> models.Event | None:
-    """The newest `awaiting_operator` record, while any task it names is not done; None otherwise.
+    """The newest `awaiting_operator` record while the build is still stopped on it; None otherwise.
 
     The newest only: each one lists everything the rest of the plan owes at that moment
     (`build_loop.owed_everywhere`), so an older one is a superset of a list that has since shrunk,
     not a second wait.
+
+    **It ends when the build moves again**, which the chain says with a `task_started` after it,
+    or when every task it names is done. It is recorded only when nothing else can run, so a start
+    after it is the build past it. Waiting for its tasks alone kept it open for the rest of the
+    cycle: the list names every task in the plan that still owes something, the last of them
+    possibly tasks away, and until then the board said nothing else could run while the build ran,
+    ahead of every decision waiting on a person. If the build stops on what is still owed, it
+    records a new wait, and that one is the newest.
     """
     statuses = task_status or {}
+    started = max((e.seq for e in events if e.event == "task_started"), default=-1)
     for event in reversed(events):
         if is_wait(event) and event.detail.get("kind") == "awaiting_operator":
-            return None if _task_outcome_resolved(event, statuses) else event
+            moved = started > event.seq or _task_outcome_resolved(event, statuses)
+            return None if moved else event
     return None
 
 

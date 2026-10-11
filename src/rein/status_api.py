@@ -260,8 +260,10 @@ def next_action(
         )
     # 5b. The build stopped because only a person can provide what comes next. A wait, not a
     # decision: the recommendation is the owed work, as the loop listed it when it stopped (#107).
+    # A decision waiting at the same time is named beside it rather than hidden behind it.
     if stage == "building" and owed:
-        return Recommendation(command="rein build", kind="provide", reason=owed)
+        beside = ("rein events --summary",) if attention_count else ()
+        return Recommendation(command="rein build", kind="provide", reason=owed, also=beside)
     # 6. Events awaiting a human decision block acceptance.
     if stage == "building" and attention_count:
         return Recommendation(

@@ -115,6 +115,7 @@ def test_a_wait_on_a_person_is_recommended_as_the_owed_work() -> None:
     owed = "1 task(s) wait on something only a person can provide ... Provide them, then run `rein build` again"
     rec = decide(owed=owed, attention_count=1)
     assert (rec.command, rec.kind, rec.reason) == ("rein build", "provide", owed)
+    assert rec.also == ("rein events --summary",), "a decision waiting beside it is not hidden behind it"
 
 
 def test_the_board_recommends_an_open_wait_from_the_chain(tmp_path: Path) -> None:

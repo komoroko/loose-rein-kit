@@ -415,6 +415,24 @@ def test_a_wait_on_a_person_is_not_a_condition_to_decide() -> None:
     assert events.open_wait(built, {**outcomes, "T-071": "done"}) is None
 
 
+def test_a_wait_ends_when_the_build_moves_again() -> None:
+    """The list names every task in the plan that still owes something. Waiting for all of them to
+    be done kept the wait open while the build ran, and the board said nothing else could run."""
+    specs: list[tuple[str, tuple[str, ...], dict[str, object]]] = [
+        ("knowledge_gap", ("T-005", "T-090"), {"kind": "awaiting_operator", "message": "2 owed"}),
+        ("task_completed", ("T-005",), {"status": "done"}),
+        ("task_started", ("T-006",), {"status": "in-progress"}),
+    ]
+    statuses = {"T-005": "done", "T-006": "in-progress", "T-090": "todo"}
+    assert events.open_wait(_detailed(*specs), statuses) is None
+
+    stopped_again = _detailed(
+        *specs, ("knowledge_gap", ("T-090",), {"kind": "awaiting_operator", "message": "1 owed: T-090"})
+    )
+    wait = events.open_wait(stopped_again, statuses)
+    assert wait is not None and wait.detail["message"] == "1 owed: T-090"
+
+
 def test_every_recorded_wait_is_a_stop_after_it_ends_too() -> None:
     """Counted while open only, a wait the person then served vanished from the count, so an archived
     cycle counted none of its waits on a person."""
