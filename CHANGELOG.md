@@ -4,6 +4,33 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.14.0] - 2026-10-11
+
+**A minor release: the format moves to `rein-grounded-v12`, and every repository needs `rein sync
+--force`.** `config.yaml` gains `review_policy.file_readers`, and a generated `review.yaml`'s
+coverage records `read_files` and `file_readers` where it had `analyzers`. No `review.yaml` ever
+held `analyzers` (nothing passed one), so an existing review reads as it is.
+
+- **A changed file the text analysis cannot read is read by a file reader, not exempted by where
+  it sits (#106).** Screenshots under a directory a criterion declared made coverage
+  `insufficient` on every build, and at high risk that blocked acceptance; the only exit was naming
+  each file at the mandate, before the run that names it. Exempting a declared directory is the
+  hole #79 closed (`dist/app.so` exempted with everything else), and accepting the gap by hand is
+  not open for a critical unknown. So the gap is closed by reading: `review_policy.file_readers`
+  declares, per kind of file, a deterministic command that runs in `quality_gate_profile` with
+  nothing of the repository mounted, is handed the one committed file, and exits 0 only when it
+  accounts for the whole of it. The manifest names the reader beside every file it read, with the
+  digest of its command and image; a file no reader claims, or one its reader refuses, stays unread
+  and the detail says which reader refused it and why. Any kind of file, not only images.
+- A reader's acceptance of a blob is cached in the evidence ledger, so the board, `doctor` and the
+  review do not run it twice over the same bytes; a refusal is always asked again.
+- A reader whose command names a path inside the repository is refused: the change under review
+  could rewrite it.
+- The unused `diff_facts.Analyzer` hook, which nothing ever passed and which never saw a binary,
+  is gone; file readers are what it was for.
+- The gate's and `doctor`'s remedy for unread files, and `/tasks`, name file readers beside a
+  criterion's exact `artifact` path. The acceptance screen lists what each reader read.
+
 ## [0.13.1] - 2026-10-11
 
 **A patch release: the format stays `rein-grounded-v11`.** Five issues filed from one recorded
