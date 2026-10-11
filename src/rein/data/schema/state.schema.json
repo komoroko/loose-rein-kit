@@ -415,7 +415,7 @@
                 ]
               },
               "report": {
-                "description": "What the last implementer said, in its own words, through `rein report`. A claim, not a verdict: the loop checks `touched` against the real diff and treats a disagreement as a finding. Its value is diagnostic — an implementer that stopped because its own sandbox refused to let it write says so here, instead of the run degrading to \"the tree did not change\" with no reason attached.",
+                "description": "What this attempt's implementer said, in its own words, through `rein report`. A claim, not a verdict: the loop checks `touched` against the real diff and treats a disagreement as a finding. Its value is diagnostic — an implementer that stopped because its own sandbox refused to let it write says so here, instead of the run degrading to \"the tree did not change\" with no reason attached.",
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
@@ -446,7 +446,7 @@
                 }
               },
               "review": {
-                "description": "What the independent reviewer said about the last attempt. Carried so the next launch reads it instead of the reviewer re-deriving the same objection, and so `question` findings — which stop nothing — still reach the human at acceptance rather than dying with the session that produced them.",
+                "description": "What the independent reviewer said about this attempt. Its `question` findings stop nothing, so a landed task keeps them and they reach the human at acceptance rather than dying with the session that produced them. A new attempt moves them under `previous`, where its launches read them instead of the reviewer re-deriving the same objection.",
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
@@ -470,6 +470,73 @@
                         "anchor": {
                           "type": "string",
                           "maxLength": 512
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "previous": {
+                "description": "What the attempt before this one said about itself: its implementer's `report` and its reviewer's `review`, moved here when the next attempt starts. The next attempt's dossier hands both over; neither is read as the running attempt's own, and neither reaches acceptance.",
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "report": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "outcome": {
+                        "enum": [
+                          "implemented",
+                          "blocked",
+                          "needs-revision"
+                        ]
+                      },
+                      "summary": {
+                        "type": "string",
+                        "maxLength": 2000
+                      },
+                      "touched": {
+                        "description": "The paths the implementer says it changed.",
+                        "type": "array",
+                        "maxItems": 128,
+                        "items": {
+                          "type": "string",
+                          "maxLength": 512
+                        }
+                      },
+                      "at": {
+                        "type": "string",
+                        "maxLength": 64
+                      }
+                    }
+                  },
+                  "review": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "findings": {
+                        "type": "array",
+                        "maxItems": 50,
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "severity": {
+                              "enum": [
+                                "must_fix",
+                                "question"
+                              ]
+                            },
+                            "statement": {
+                              "type": "string",
+                              "maxLength": 2000
+                            },
+                            "anchor": {
+                              "type": "string",
+                              "maxLength": 512
+                            }
+                          }
                         }
                       }
                     }

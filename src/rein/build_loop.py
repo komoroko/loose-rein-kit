@@ -515,9 +515,10 @@ def set_task_status(
     because a transaction here must record *why*, and "an agent produced some output" is not a
     reason a hash-chained log should carry a line for.
 
-    `handoff.review` is the one part a landed task keeps: its reviewer's findings, which
-    `brief.residual_findings` carries to acceptance. `new_attempt` drops the previous attempt's,
-    because those were made against a tree this attempt replaces.
+    `new_attempt` moves what the attempt before said about itself, its `report` and its
+    reviewer's `review`, under `handoff.previous` (`_begin_attempt`). `handoff.review` is the one
+    part a landed task keeps: its reviewer's findings, which `brief.residual_findings` carries to
+    acceptance, and only this attempt's.
 
     Retried on a lost race with a leaf writing its own task entry through the control plane.
     """
@@ -584,8 +585,8 @@ def _set_task_status_once(
     raw = json.loads(json.dumps(state.raw))
     tasks = raw.setdefault("tasks", {})
     entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
-    if new_attempt and isinstance(entry.get("handoff"), dict):
-        entry = {**entry, "handoff": {k: v for k, v in entry["handoff"].items() if k != "review"}}
+    if new_attempt:
+        entry = _begin_attempt(entry)
     attempts = entry.get("attempts", 0) if isinstance(entry.get("attempts"), int) else 0
     if status == "in-progress":
         attempts += 1
@@ -596,9 +597,11 @@ def _set_task_status_once(
         # So both carry the record, and a promotion from one to the other keeps the one already
         # written rather than needing the run that established it to still be alive.
         #
-        # The handoff goes, except its reviewer's findings: a `question` stops nothing by design
-        # and reaches a person only from here (`brief.residual_findings`). Dropping the whole
-        # handoff dropped every question a task that landed was asked (#108).
+        # The handoff goes, except this attempt's reviewer findings: a `question` stops nothing by
+        # design and reaches a person only from here (`brief.residual_findings`). Dropping the
+        # whole handoff dropped every question a task that landed was asked (#108). The previous
+        # attempt's findings, under `previous`, go with the rest: they were made against a tree
+        # this landing replaced.
         review = _merge_handoff(entry.get("handoff"), handoff).get("review")
         merged.pop("handoff", None)
         if review:
@@ -638,6 +641,31 @@ def _set_task_status_once(
 
 
 # --- what the next attempt inherits (through the Central Store) ----------------
+
+#: What an attempt says about itself: the implementer's `rein report` and the reviewer's findings.
+#: Each is true of one attempt's tree, so a new attempt moves them under `handoff.previous`.
+_ATTEMPT_FIELDS = ("report", "review")
+
+
+def _begin_attempt(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """`entry` with the last attempt's own account moved under `handoff.previous`.
+
+    One key had meant two things. The next attempt's dossier hands the previous implementer's
+    report and reviewer's findings over on purpose (`dossier._previous_attempt`), and the loop
+    reads the same keys as what *this* attempt said: `_read_report` re-raised an inherited
+    `needs-revision` byte for byte against a revised plan (#105), and a landed task's residual
+    questions would have carried the findings made against a tree it replaced (#108). Kept apart,
+    neither reader has to tell them apart. Only the attempt just before is kept: one that said
+    nothing about itself leaves nothing under `previous`, and an older account is older than that.
+    """
+    handoff = entry.get("handoff")
+    if not isinstance(handoff, Mapping):
+        return dict(entry)
+    kept = {k: v for k, v in handoff.items() if k not in _ATTEMPT_FIELDS and k != "previous"}
+    previous = {k: handoff[k] for k in _ATTEMPT_FIELDS if isinstance(handoff.get(k), Mapping)}
+    if previous:
+        kept["previous"] = previous
+    return {**entry, "handoff": kept}
 #
 # The implementer's own agent session is process-local and dies with the terminal that ran it, so
 # what a build restarted from another terminal inherits has to be written down: which gate step
@@ -1009,10 +1037,6 @@ class Orchestrator:
         #: nothing, as a held lock does). `--supervise` schedules the next attempt from it: the
         #: exit code alone carries no reset time, and `run()` returns only the code.
         self.refusal = ""
-        #: Per task started in this run, the `at` of the `rein report` its handoff already held:
-        #: the previous attempt's, which this attempt's dossier hands over and `_read_report` must
-        #: not read as this attempt's own (`_start_attempts`).
-        self._inherited_report_at: dict[str, str] = {}
         # The run's allowance for retrying a launch the *machine* failed. One counter for the
         # whole run, guarded because parallel leaves draw on it at the same time: an environment
         # fault is a property of the machine, so a per-task budget would let one broken
@@ -2858,33 +2882,15 @@ class Orchestrator:
         with self._evidence_lock:
             self._evidence[task.id] = record
 
-    def _start_attempts(self, tasks: Sequence[dag.Task]) -> None:
-        """Put each task `in-progress`, noting which report its handoff carried in from before.
-
-        A reset that keeps the handoff keeps `handoff.report`, and it should: the next attempt's
-        dossier hands the previous implementer's account over (`dossier._handoff_note`). What it
-        must not do is answer for this attempt. An implementer reported `needs-revision`, the plan
-        was revised and the task reset, and four minutes into the next attempt the loop re-raised
-        that report byte for byte, against a plan it was no longer true of (#105).
-        """
-        for task in tasks:
-            report = self._handoff_for(task).get("report")
-            self._inherited_report_at[task.id] = str(report.get("at", "")) if isinstance(report, dict) else ""
-            self._set_status(task.id, "in-progress", new_attempt=True)
-
     def _read_report(self, task: dag.Task) -> dict[str, Any]:
         """What the implementer said about this attempt, through `rein report`. {} when it said nothing.
 
-        A report this attempt inherited is not one it made (`_start_attempts`). Told apart by its
-        `at`, which `control_plane` stamps on every report, so a new one never carries the old one's.
+        Only this attempt's: the one before it is under `handoff.previous` (`_begin_attempt`).
         """
         if self.dry_run:
             return {}
         report = self._handoff_for(task).get("report")
-        if not isinstance(report, dict):
-            return {}
-        inherited = self._inherited_report_at.get(task.id, "")
-        return {} if inherited and str(report.get("at", "")) == inherited else dict(report)
+        return dict(report) if isinstance(report, dict) else {}
 
     def _check_implementer_output(self, task: dag.Task, cwd: str) -> tuple[str, str]:
         """What the implementer's attempt actually produced. ("", "") when it may go to the gate.
@@ -4539,7 +4545,8 @@ class Orchestrator:
         first — leaves that did pass their gate earned their merge, and throwing that away
         because a *different* leaf hit a session limit would be its own kind of dishonesty.
         """
-        self._start_attempts(tasks)
+        for task in tasks:
+            self._set_status(task.id, "in-progress", new_attempt=True)
         # Worktree creation is serial (avoid git lock contention). The implementation is run in parallel after.
         branches = {
             task.id: self.ws.add_worktree(task.id, str(self._handoff_for(task).get("salvage_branch", "")))
