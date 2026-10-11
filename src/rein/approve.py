@@ -1607,13 +1607,13 @@ def mandate_delta(repo: repo_mod.Repo, plan: models.Plan) -> list[dict[str, str]
     back clears the receipt that named it and the chain keeps only the digest. When that version
     was never committed, the delta cannot be shown and the row says so rather than showing none.
     """
-    last = _last_mandate_approval(repo)
+    last = last_mandate_approval(repo)
     if last is None:
         return []
     digest = str(last.detail["plan_digest"])
     if digest == plan.digest():
         return []
-    previous = _plan_with_digest(repo, digest)
+    previous = plan_with_digest(repo, digest)
     if previous is None:
         return [
             {
@@ -1626,7 +1626,7 @@ def mandate_delta(repo: repo_mod.Repo, plan: models.Plan) -> list[dict[str, str]
     return plan_delta(previous, plan)
 
 
-def _last_mandate_approval(repo: repo_mod.Repo) -> models.Event | None:
+def last_mandate_approval(repo: repo_mod.Repo) -> models.Event | None:
     events, _ = event_chain.scan(repo.events)
     approvals = [
         e
@@ -1652,7 +1652,7 @@ def document_delta(repo: repo_mod.Repo, plan: models.Plan) -> list[dict[str, str
     there is nothing to show. The version approved last time is found by the digest the approval
     recorded (`record_approval`), in git's history of that path.
     """
-    last = _last_mandate_approval(repo)
+    last = last_mandate_approval(repo)
     if last is None:
         return []
     recorded = last.detail.get("sources")
@@ -1725,7 +1725,7 @@ def _blob_with_digest(repo: repo_mod.Repo, path: str, digest: str) -> str | None
     return None
 
 
-def _plan_with_digest(repo: repo_mod.Repo, digest: str) -> models.Plan | None:
+def plan_with_digest(repo: repo_mod.Repo, digest: str) -> models.Plan | None:
     listing = repo._git("log", f"-{_PLAN_HISTORY_DEPTH}", "--format=%H", "--", ".rein/plan.yaml")
     for commit in listing.splitlines():
         rc, text = repo._git_rc("show", f"{commit}:.rein/plan.yaml")

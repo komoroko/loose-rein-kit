@@ -36,10 +36,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from rein import common, dag, event_chain, models
+from rein import approve, common, dag, event_chain, models
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -107,6 +108,115 @@ def _reset_once(repo: repo_mod.Repo, task_id: str, status: str, reason: str, fre
         tx.write("state", raw, expect_digest=seen)
         tx.append("decision_declared", cycle_id=state.cycle_id, subject_ids=[task_id], detail=detail)
     return ResetResult(previous=previous, handoff={} if fresh else handoff)
+
+
+def keep(repo: repo_mod.Repo, task_id: str, *, reason: str) -> str:
+    """Restore `done` to a task a roll back marked while it was done, and record why (#112).
+
+    The reconcile after `rein revise --impacted` classifies each marked task, and *keep* means
+    "restore its former status". `reset` covers every former status but `done`, which it refuses
+    on purpose: declaring a task done by hand forges the evidence acceptance reviews. Nor can a
+    build reach it again — the implementer has nothing to change, and an attempt that changes
+    nothing is stopped as `no_implementation`. So a done task marked by a roll back had no exit.
+
+    This is not `reset --status done`. It restores the `done` the build already decided, and only
+    when that decision still stands on the record:
+
+      - the mark kept the entry whole (`revise.apply`), so `completed_commit` is still there; a
+        task the build or a reset sent back has none, and goes through `reset`;
+      - that commit is in `HEAD`'s history;
+      - the task in the plan is the one the last mandate approval froze, except for paths added
+        to an `artifact` criterion — the one change whose evidence can be checked here, by those
+        paths being in `HEAD`. Any other change to the task is a question a run answers.
+
+    Returns the restored `completed_commit`.
+    """
+    return store_mod.retry_on_stale(lambda: _keep_once(repo, task_id, reason))
+
+
+def _keep_once(repo: repo_mod.Repo, task_id: str, reason: str) -> str:
+    store = store_mod.Store(repo)
+    state, plan = store.read_state(), store.read_plan()
+    if state is None or plan is None:
+        raise ValueError("no .rein/state.yaml or .rein/plan.yaml — run `rein init` first")
+    task = next((t for t in plan.tasks if t.id == task_id), None)
+    if task is None:
+        raise ValueError(f"{task_id} is not a task in .rein/plan.yaml — `rein dag` lists them")
+    raw = json.loads(json.dumps(state.raw))
+    entry = raw.get("tasks", {}).get(task_id)
+    status = entry.get("status") if isinstance(entry, dict) else "todo"
+    if status != "needs-revision":
+        raise ValueError(f"{task_id} is {status}: only a task a roll back marked needs-revision is kept")
+    assert isinstance(entry, dict)
+    commit = entry.get("completed_commit")
+    if not isinstance(commit, str) or not commit:
+        raise ValueError(
+            f"{task_id} was not done when it was marked (it has no completed_commit): restore it with "
+            "`rein task reset <id> --reason …`"
+        )
+    if repo._git_rc("merge-base", "--is-ancestor", commit, "HEAD")[0] != 0:
+        raise ValueError(
+            f"{task_id}'s completed_commit {commit[:12]} is not in HEAD's history: the work it landed is gone"
+        )
+    approval = approve.last_mandate_approval(repo)
+    approved = approve.plan_with_digest(repo, str(approval.detail["plan_digest"])) if approval is not None else None
+    before = next((t for t in approved.tasks if t.id == task_id), None) if approved is not None else None
+    if before is None:
+        raise ValueError(
+            f"the plan {task_id} was done under is not in git's history, so what changed in it cannot be checked"
+        )
+    changed = sorted(
+        field
+        for field in before.raw.keys() | task.raw.keys()
+        if _without_artifact_paths(field, before.raw.get(field)) != _without_artifact_paths(field, task.raw.get(field))
+    )
+    if changed:
+        raise ValueError(
+            f"{task_id} changed since the mandate it was done under ({', '.join(changed)}), beyond paths added to an "
+            "artifact criterion: that is a change a run has to answer, not a keep"
+        )
+    # The comparison above set every artifact criterion's paths aside; what it may differ by is additions.
+    dropped = [
+        p
+        for old, new in zip(before.acceptance, task.acceptance, strict=True)
+        for p in _artifact_paths(old)
+        if p not in _artifact_paths(new)
+    ]
+    if dropped:
+        raise ValueError(
+            f"{task_id}'s artifact criteria no longer name {', '.join(dropped)}: that loosens what it was held to"
+        )
+    named = [p for e in task.acceptance for p in _artifact_paths(e)]
+    missing = [p for p in named if repo._git_rc("cat-file", "-e", f"HEAD:{p}")[0] != 0]
+    if missing:
+        raise ValueError(f"{task_id}'s artifact criteria name paths HEAD does not have: {', '.join(missing)}")
+
+    seen = store_mod.read_digest(state)
+    raw["tasks"][task_id] = {**entry, "status": "done"}
+    raw["updated_at"] = event_chain.now_iso()
+    detail = {"kind": "task_kept", "from": status, "to": "done", "commit": commit, "reason": reason[:_REASON_MAX]}
+    with store.transaction() as tx:
+        tx.write("state", raw, expect_digest=seen)
+        tx.append("decision_declared", cycle_id=state.cycle_id, subject_ids=[task_id], detail=detail)
+    return commit
+
+
+def _artifact_paths(criterion: Any) -> list[str]:
+    evidence = criterion.get("evidence") if isinstance(criterion, Mapping) else None
+    if not isinstance(evidence, Mapping) or evidence.get("kind") != "artifact":
+        return []
+    return [str(p) for p in evidence.get("paths", [])]
+
+
+def _without_artifact_paths(field: str, value: Any) -> Any:
+    """A task field with every artifact criterion's `paths` set aside — what `keep` compares."""
+    if field != "acceptance" or not isinstance(value, list):
+        return value
+    stripped = json.loads(json.dumps(value))
+    for criterion in stripped:
+        if _artifact_paths(criterion):
+            criterion["evidence"].pop("paths")
+    return stripped
 
 
 def order(repo: repo_mod.Repo, task_id: str, *, after: str, reason: str) -> None:
@@ -377,6 +487,12 @@ def main(argv: list[str] | None = None) -> int:
     scope_parser.add_argument("path", help="the repo-relative path to add")
     scope_parser.add_argument("--reason", required=True, help="why — recorded in the audit chain, shown at acceptance")
     scope_parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
+    keep_parser = sub.add_parser(
+        "keep", help="restore done to a task a roll back marked while it was done, when its record still stands"
+    )
+    keep_parser.add_argument("task_id", help="the task the roll back marked (T-NNN)")
+    keep_parser.add_argument("--reason", required=True, help="why it is unaffected — recorded in the audit chain")
+    keep_parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     defer_parser = sub.add_parser(
         "defer", help="record that a task deleted from the draft plan was taken out of this cycle"
     )
@@ -391,6 +507,8 @@ def main(argv: list[str] | None = None) -> int:
         return _defer_main(args)
     if args.action == "scope-add":
         return _scope_add_main(args)
+    if args.action == "keep":
+        return _keep_main(args)
 
     reason = args.reason.strip()
     if not reason:
@@ -460,6 +578,21 @@ def _scope_add_main(args: argparse.Namespace) -> int:
         logger.error(str(exc))
         return 1
     print(f"{args.task_id} may now change {args.path} ({reason}) — the plan and its approval stand")
+    return 0
+
+
+def _keep_main(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        logger.error("--reason cannot be empty: the mandate re-approval reads why the task was kept")
+        return 2
+    try:
+        repo = repo_mod.get(args.repo)
+        commit = keep(repo, args.task_id.strip(), reason=reason)
+    except (repo_mod.RepoNotFoundError, OSError, ValueError, models.DocumentError, store_mod.StoreError) as exc:
+        logger.error(str(exc))
+        return 1
+    print(f"{args.task_id}: needs-revision → done, on {commit[:12]} ({reason})")
     return 0
 
 
