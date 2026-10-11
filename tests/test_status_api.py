@@ -135,7 +135,9 @@ def test_the_board_recommends_an_open_wait_from_the_chain(tmp_path: Path) -> Non
     status = status_api.collect_status(repo_mod.Repo(tmp_path))
     assert status["next"]["kind"] == "provide", status["next"]  # type: ignore[index]
     assert "labels.csv" in status["next"]["reason"]  # type: ignore[index]
-    assert not [item for item in status["pending"] if item["kind"] == "escalation"]  # type: ignore[union-attr]
+    queue = status["pending"]
+    assert isinstance(queue, list)
+    assert not [item for item in queue if item["kind"] == "escalation"]
 
 
 def test_with_no_mandate_the_board_points_at_writing_one() -> None:

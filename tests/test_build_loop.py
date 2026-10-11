@@ -2483,6 +2483,7 @@ def test_a_question_the_reviewer_asked_survives_the_task_landing(tmp_path: Path)
     build_loop.set_task_status(repo, "T-001", "done", commit="a" * 40, handoff={"review": {"findings": [_QUESTION]}})
 
     state = store_mod.Store(repo).read_state()
+    assert state is not None
     [finding] = brief.residual_findings(state)
     assert finding["statement"] == _QUESTION["statement"]
     assert set(state.raw["tasks"]["T-001"]["handoff"]) == {"review", "updated_at"}
