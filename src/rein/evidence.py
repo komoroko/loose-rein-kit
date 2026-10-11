@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 
 #: The cache file inside the repository's cache directory.
 FILENAME = "evidence.jsonl"
+#: Held while a flush re-reads the file and writes it back (`Ledger.flush`).
+LOCK_FILENAME = "evidence.lock"
+#: How long a flush waits for another one. A flush is one read and one write of a capped file.
+LOCK_WAIT_SEC = 10.0
 
 #: How many facts to keep. Old entries are harmless (an unmatched key is simply never read), so
 #: the cap is about file size, not correctness — the newest entries are the ones a live run asks for.
@@ -98,7 +102,8 @@ class Ledger:
     path: Path | None
     enabled: bool = True
     _facts: dict[str, Fact] = field(default_factory=dict, repr=False)
-    _dirty: bool = False
+    #: What this instance established since it last read the file: all `flush` adds to it.
+    _new: dict[str, Fact] = field(default_factory=dict, repr=False)
     hits: int = 0
     misses: int = 0
 
@@ -140,46 +145,69 @@ class Ledger:
         key = fact_key(kind, subject, tool)
         if key in self._facts:
             return
-        self._facts[key] = Fact(key=key, kind=kind, subject=subject, tool=tuple(tool), at=event_chain.now_iso())
-        self._dirty = True
+        fact = Fact(key=key, kind=kind, subject=subject, tool=tuple(tool), at=event_chain.now_iso())
+        self._facts[key] = fact
+        self._new[key] = fact
 
     # -- persistence ----------------------------------------------------------
 
     def _load(self) -> None:
-        if self.path is None or not self.path.exists():
+        if self.path is None:
             return
         try:
-            text = self.path.read_text(encoding="utf-8")
+            self._facts = _read(self.path)
         except OSError as exc:
             logger.debug(f"evidence cache unreadable ({exc}); every step will run")
             self.enabled = False
-            return
-        for line in text.splitlines():
-            fact = _parse(line)
-            if fact is not None:
-                self._facts[fact.key] = fact
 
     def flush(self) -> None:
-        """Write the ledger back, newest-last and capped. Any failure is silent by design.
+        """Add what this instance established to the file, newest-last and capped. Any failure is
+        silent by design.
 
         A cache that cannot be written must not be able to fail a build: the next run simply
         re-establishes what it needs.
+
+        **Added to the file as it is now, not to the copy this instance loaded.** Several ledgers
+        are open on one file at once: the build's own for its whole run, one per file-reader scope
+        inside it, the board's and `doctor`'s in other processes. Writing back the loaded copy
+        erased whatever another one had flushed since, so a reader's acceptance recorded during a
+        build was gone when the build ended, and was run again by the next one to ask. The re-read
+        and the write happen under one lock, so two flushes cannot interleave either.
         """
-        if self.path is None or not self._dirty:
+        if self.path is None or not self._new:
             return
-        kept = list(self._facts.values())[-MAX_ENTRIES:]
-        body = "".join(json.dumps(f.to_mapping(), sort_keys=True, separators=(",", ":")) + "\n" for f in kept)
         try:
-            store_mod.atomic_write(self.path, body.encode("utf-8"), mode=0o600)
-            self._dirty = False
+            with store_mod.FileLock(self.path.with_name(LOCK_FILENAME), wait_sec=LOCK_WAIT_SEC):
+                facts = _read(self.path)
+                facts.update((key, fact) for key, fact in self._new.items() if key not in facts)
+                kept = list(facts.values())[-MAX_ENTRIES:]
+                body = "".join(json.dumps(f.to_mapping(), sort_keys=True, separators=(",", ":")) + "\n" for f in kept)
+                store_mod.atomic_write(self.path, body.encode("utf-8"), mode=0o600)
         except (store_mod.StoreError, OSError) as exc:  # pragma: no cover - filesystem edge
             logger.debug(f"could not write the evidence cache ({exc})")
+            return
+        self._facts = {**facts, **self._facts}
+        self._new = {}
 
     def summary(self) -> str:
         """One line for the run's console output. Empty when the ledger is off."""
         if not self.enabled:
             return ""
         return f"evidence: {self.hits} reused, {self.misses} run"
+
+
+def _read(path: Path) -> dict[str, Fact]:
+    """The facts in the cache file, in file order. {} when there is no file yet."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    facts: dict[str, Fact] = {}
+    for line in text.splitlines():
+        fact = _parse(line)
+        if fact is not None:
+            facts[fact.key] = fact
+    return facts
 
 
 def _parse(line: str) -> Fact | None:
