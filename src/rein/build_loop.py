@@ -992,6 +992,10 @@ class Orchestrator:
         #: nothing, as a held lock does). `--supervise` schedules the next attempt from it: the
         #: exit code alone carries no reset time, and `run()` returns only the code.
         self.refusal = ""
+        #: Per task started in this run, the `at` of the `rein report` its handoff already held:
+        #: the previous attempt's, which this attempt's dossier hands over and `_read_report` must
+        #: not read as this attempt's own (`_start_attempts`).
+        self._inherited_report_at: dict[str, str] = {}
         # The run's allowance for retrying a launch the *machine* failed. One counter for the
         # whole run, guarded because parallel leaves draw on it at the same time: an environment
         # fault is a property of the machine, so a per-task budget would let one broken
@@ -2831,12 +2835,33 @@ class Orchestrator:
         with self._evidence_lock:
             self._evidence[task.id] = record
 
+    def _start_attempts(self, tasks: Sequence[dag.Task]) -> None:
+        """Put each task `in-progress`, noting which report its handoff carried in from before.
+
+        A reset that keeps the handoff keeps `handoff.report`, and it should: the next attempt's
+        dossier hands the previous implementer's account over (`dossier._handoff_note`). What it
+        must not do is answer for this attempt. An implementer reported `needs-revision`, the plan
+        was revised and the task reset, and four minutes into the next attempt the loop re-raised
+        that report byte for byte, against a plan it was no longer true of (#105).
+        """
+        for task in tasks:
+            report = self._handoff_for(task).get("report")
+            self._inherited_report_at[task.id] = str(report.get("at", "")) if isinstance(report, dict) else ""
+            self._set_status(task.id, "in-progress")
+
     def _read_report(self, task: dag.Task) -> dict[str, Any]:
-        """What the implementer said about this attempt, through `rein report`. {} when it said nothing."""
+        """What the implementer said about this attempt, through `rein report`. {} when it said nothing.
+
+        A report this attempt inherited is not one it made (`_start_attempts`). Told apart by its
+        `at`, which `control_plane` stamps on every report, so a new one never carries the old one's.
+        """
         if self.dry_run:
             return {}
         report = self._handoff_for(task).get("report")
-        return dict(report) if isinstance(report, dict) else {}
+        if not isinstance(report, dict):
+            return {}
+        inherited = self._inherited_report_at.get(task.id, "")
+        return {} if inherited and str(report.get("at", "")) == inherited else dict(report)
 
     def _check_implementer_output(self, task: dag.Task, cwd: str) -> tuple[str, str]:
         """What the implementer's attempt actually produced. ("", "") when it may go to the gate.
@@ -4488,8 +4513,7 @@ class Orchestrator:
         first — leaves that did pass their gate earned their merge, and throwing that away
         because a *different* leaf hit a session limit would be its own kind of dishonesty.
         """
-        for task in tasks:
-            self._set_status(task.id, "in-progress")
+        self._start_attempts(tasks)
         # Worktree creation is serial (avoid git lock contention). The implementation is run in parallel after.
         branches = {
             task.id: self.ws.add_worktree(task.id, str(self._handoff_for(task).get("salvage_branch", "")))

@@ -2435,6 +2435,43 @@ def test_an_implementer_that_said_needs_revision_parks_the_task_there_on_the_rep
     assert loop._stops["T-001"] == "needs-revision"
 
 
+def _report(loop: build_loop.Orchestrator, outcome: str, at: str) -> None:
+    build_loop.update_task_handoff(
+        loop.repo,
+        "T-001",
+        {"report": {"outcome": outcome, "summary": f"{outcome} at {at}", "at": at}},
+        event="decision_declared",
+        detail={"kind": "test"},
+    )
+
+
+def test_a_report_kept_across_a_reset_is_not_the_next_attempts_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#105: the previous attempt's `needs-revision`, kept by a reset that kept the handoff, was
+    re-raised verbatim by an attempt that never called `rein report`."""
+    loop = orchestrator(tmp_path)
+    _report(loop, "needs-revision", "2026-10-10T01:00:00Z")
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd: ([], "git diff work...T-001"))
+
+    loop._start_attempts([_task()])
+    kind, message = loop._check_implementer_output(_task(), str(tmp_path))
+
+    assert kind == "no_implementation"
+    assert "never called `rein report`" in message
+
+
+def test_a_report_this_attempt_made_is_read(tmp_path: Path) -> None:
+    loop = orchestrator(tmp_path)
+    _report(loop, "needs-revision", "2026-10-10T01:00:00Z")
+    loop._start_attempts([_task()])
+    _report(loop, "blocked", "2026-10-10T02:00:00Z")
+
+    assert loop._read_report(_task())["outcome"] == "blocked"
+    kind, _ = loop._check_implementer_output(_task(), str(tmp_path))
+    assert kind == "agent_blocked"
+
+
 def test_a_moved_tree_earns_the_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Something changed since that verdict — another task merged, a human edited — so the question
     is not the one that was answered."""
