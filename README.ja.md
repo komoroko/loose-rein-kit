@@ -284,7 +284,7 @@ command: notify-send "rein"
 持っていなければ読み取り専用である。
 
 ## 設定できるもの
-<!-- README.md: a64bf94aa2b2 -->
+<!-- README.md: dafef0c4ab51 -->
 
 つまみはすべて `.rein/config.yaml` にあり、その場にコメントが付いている。以下はそのうちプロジェクトが
 普通に触るものである。既存リポジトリでは `rein init` が、認識できた品質ゲートのコマンドだけを埋める。
@@ -310,8 +310,8 @@ comparison である。`adversarial`・`correctness`・`simplification`・`secur
 ものはない。comparison を外すと、すべての claim があなたへの問いになり、読まなかったものは
 acceptance で名指しされる。タスクのレビュアーは指摘を `review_policy.repair_rounds` の回数まで
 差し戻す。acceptance が修理に使う回数と同じである。mandate の凍結の外にあるので変えても何も巻き
-戻らず、変えられるのはあなただけである。端末で `rein reviews apply <file> --reason ...` を実行
-するか、ダッシュボードの Reviews 画面を使う。画面ではレビューを段の列へドラッグして足して × で
+戻らず、変えられるのはあなただけである。端末で `rein reviews apply <file>` を実行するか、
+ダッシュボードの Reviews 画面を使う。画面ではレビューを段の列へドラッグして足して × で
 外し、段だけのものはその場で切り替える。変更は書いた文書ごと記録され、記録と食い違うファイルでは
 何も動かない。`rein reviews restore` が記録された版を書き戻す。
 

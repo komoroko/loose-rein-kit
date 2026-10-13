@@ -141,7 +141,7 @@ _DOCUMENT_REPAIR: dict[str, str] = {
     ),
     "reviews": (
         "outside the mandate's freeze and written only by a person: `rein reviews restore` writes back the "
-        "version the audit chain records, and a change goes through `rein reviews apply <file> --reason ...` "
+        "version the audit chain records, and a change goes through `rein reviews apply <file>` "
         "at your terminal"
     ),
     "state": (

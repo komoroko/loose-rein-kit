@@ -4,6 +4,18 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.14.1] - 2026-10-13
+
+**A patch release: nothing a repository runs changes format, and `rein sync` is enough.** A
+change to which reviews run no longer needs a reason.
+
+- **Changing which reviews run takes a reason only when one is given (CR-76).** `rein reviews
+  apply` made `--reason` required and the Reviews screen kept Apply grey until one was typed, while
+  `reviews_changed` already records the document written, its digest, every change in words, who
+  and when. The reason is optional now: given, it is recorded and shown as before; left out, the
+  event carries no `reason` and the mandate screen's adversarial-off row says when and by whom. A
+  dispute still needs its reason: there the reason is the judgement.
+
 ## [0.14.0] - 2026-10-11
 
 **A minor release: the format moves to `rein-grounded-v12`, and every repository needs `rein sync

@@ -7,7 +7,7 @@
 // palette onto any lane, where it reads what that lane reads, and taken off with ×. Nothing is
 // required, and what was not read is named where it is decided on.
 //
-// The screen edits a draft of the whole document and applies it in one write, with a reason: the
+// The screen edits a draft of the whole document and applies it in one write, with a reason if one is given: the
 // same function `rein reviews apply` calls, and the same `reviews_changed` event in the chain.
 // Nothing here rewinds a gate. `reviews.yaml` is outside the mandate's freeze. The write is made
 // against the digest the screen was served: a change that landed meanwhile is refused, not undone.
@@ -251,7 +251,7 @@ export default function ReviewsView() {
           × takes it off. What
           belongs to one stage alone is switched in place. None is required, and what is not read is named where it
           is decided on. Outside the mandate&apos;s freeze: a change here rewinds nothing, applies from the next
-          reading, and is recorded with your reason.
+          reading, and is recorded with your reason if you give one.
         </p>
         <ul className="chips palette" aria-label="reviews to drag">
           {palette.map((name) => (
@@ -355,7 +355,7 @@ export default function ReviewsView() {
                   </ul>
                 )}
                 <label className="pending-reason">
-                  Reason, required. It is recorded in the audit chain and shown at acceptance.
+                  Reason, optional. It is recorded in the audit chain and shown at acceptance.
                   <input
                     aria-label="reason"
                     placeholder="why this changes which reviews run"
@@ -364,11 +364,10 @@ export default function ReviewsView() {
                   />
                 </label>
                 <div className="pending-actions">
-                  <button className="primary" disabled={blocked || !reason.trim()} onClick={apply}>
+                  <button className="primary" disabled={blocked} onClick={apply}>
                     Apply
                   </button>
                   <button onClick={() => setDraft(JSON.parse(JSON.stringify(loaded.document)))}>Discard</button>
-                  {!blocked && !reason.trim() ? <span className="note">Write a reason to apply.</span> : null}
                 </div>
               </>
             ) : (

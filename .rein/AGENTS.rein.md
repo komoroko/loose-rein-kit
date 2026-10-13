@@ -157,8 +157,8 @@ Four documents, distinct roles — do not conflate them:
   adversarial review of a drafted document; acceptance's `actual_extraction` and `comparison`), and
   the reviews added to it. Any of them may be off; what was not read is named at acceptance. Outside the mandate's freeze, and **a human's
   to change, never yours**: `rein reviews apply` at their terminal or the dashboard writes it, with
-  the reason and the whole document in the chain, and nothing runs on a file that differs from that
-  record. Read it with `rein reviews show`; never edit it, and never run `apply` for them —
+  the whole document, and the reason when one is given, in the chain, and nothing runs on a file
+  that differs from that record. Read it with `rein reviews show`; never edit it, and never run `apply` for them —
   switching off the review of your own work is the thing this file is kept from you for. When it
   has been changed without a record, `rein reviews restore` puts back what the chain records.
 - **`.rein/events.ndjson`** — the hash-chained audit log. Every state change records why;

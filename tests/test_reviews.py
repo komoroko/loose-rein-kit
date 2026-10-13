@@ -3,7 +3,7 @@
 What the freeze used to guarantee about the reviewer is kept by other means, and each of those
 means is pinned here: the guard refuses an editor's write, every write is recorded with the
 document it wrote, nothing runs on a file that differs from that record (CR-56), the verb insists
-on a terminal and a reason, and acceptance says what each task was actually read for.
+on a terminal, and acceptance says what each task was actually read for.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import approve, brief, build_loop, data, doctor, event_chain, gate_guard, models, reviews_cmd, store
+from rein import approve, brief, build_loop, common, data, doctor, event_chain, gate_guard, models, reviews_cmd, store
 from rein import repo as repo_mod
 from tests._support import make_config, make_plan, make_reviews, make_state, seed_repo
 
@@ -131,10 +131,27 @@ def test_a_write_of_reviews_yaml_without_its_record_is_refused_by_the_store(tmp_
     assert reviews_cmd.binding_problem(repo) == ""
 
 
-def test_a_change_needs_a_reason(tmp_path: Path) -> None:
+def test_a_change_without_a_reason_is_applied_and_records_none(tmp_path: Path) -> None:
+    """The record already holds the document, its digest, the changes, who and when (CR-76). A
+    required reason added nothing to that but a sentence written to get past the field."""
     repo = _frozen(tmp_path)
-    with pytest.raises(reviews_cmd.ReviewsError, match="needs a reason"):
-        _apply(repo, _without_simplification(), "  ")
+    assert _apply(repo, _without_simplification(), "  ") == ["build: no longer reads for simplification"]
+    events, _ = event_chain.scan(repo.events)
+    assert events[-1].event == "reviews_changed" and "reason" not in events[-1].detail
+    record = reviews_cmd.recorded(repo)
+    assert record is not None and record.reason == ""
+
+
+def test_the_terminal_route_applies_without_a_reason(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _frozen(tmp_path)
+    draft = tmp_path / "draft.yaml"
+    draft.write_bytes(store.dump_yaml(_without_simplification()))
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(common, "ask_yes_no", lambda _prompt: True)
+
+    assert reviews_cmd.main(["apply", str(draft), "--repo", str(tmp_path)]) == 0
+    reviews = store.Store(repo).read_reviews()
+    assert reviews is not None and reviews.reviews_at("build") == ("correctness",)
 
 
 def test_a_change_made_against_an_older_version_is_refused_not_written_over(tmp_path: Path) -> None:
@@ -315,6 +332,13 @@ def test_a_stage_already_off_when_the_round_began_says_so(tmp_path: Path) -> Non
 
     [row] = approve.naming(repo, "mandate")["adversarial_off"]
     assert row["change"].startswith("off when this round began") and "we never review design here" in row["change"]
+
+
+def test_a_stage_switched_off_without_a_reason_says_who_and_when(tmp_path: Path) -> None:
+    repo = _drafting(tmp_path)
+    _design(repo, False, "")
+    [row] = approve.naming(repo, "mandate")["adversarial_off"]
+    assert row["change"].startswith("switched off ") and row["change"].endswith("by test")
 
 
 def test_the_packaged_reviews_read_for_the_adversarial_review_alone() -> None:

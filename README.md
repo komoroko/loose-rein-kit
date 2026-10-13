@@ -310,7 +310,7 @@ else, and keeps every stage's own on. Nothing is required: switched off, the com
 claim to you as a question, and acceptance names whatever was not read. A task's reviewer sends its
 findings back as many times as `review_policy.repair_rounds` allows, the same budget acceptance
 repairs on. It is outside the mandate's freeze, so changing it rewinds nothing, and it is yours alone
-to change: `rein reviews apply <file> --reason ...` at your terminal, or the dashboard's Reviews
+to change: `rein reviews apply <file>` at your terminal, or the dashboard's Reviews
 screen, where a review is dragged onto a lane and removed with ×, and a stage's own is switched in
 place. Each change is recorded with the document it wrote, and nothing runs on a file that differs
 from that record; `rein reviews restore` writes it back.
