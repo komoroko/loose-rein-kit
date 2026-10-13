@@ -1,5 +1,5 @@
 # .rein/reviews.yaml — which reviews run, stage by stage. Outside the mandate's freeze: changing
-# one rewinds nothing. Written only by `rein reviews apply <file> --reason ...` at a terminal, or by
+# one rewinds nothing. Written only by `rein reviews apply <file>` at a terminal, or by
 # the dashboard's write session, and every change is recorded in the audit chain with the document
 # it wrote. Nothing runs on a file that differs from that record: `rein reviews restore` writes the
 # recorded one back.

@@ -81,6 +81,12 @@ each fixed where it starts.
   in `HEAD`'s history, and the task differs from the one the last mandate approval froze by paths
   added to an `artifact` criterion and nothing else, every one of them in `HEAD`. A path taken
   off, or any other change to the task, is a question a run answers, and is refused.
+- **Changing which reviews run takes a reason only when one is given (CR-76).** `rein reviews
+  apply` made `--reason` required and the Reviews screen kept Apply grey until one was typed, while
+  `reviews_changed` already records the document written, its digest, every change in words, who
+  and when. The reason is optional now: given, it is recorded and shown as before; left out, the
+  event carries no `reason` and the mandate screen's adversarial-off row says when and by whom. A
+  dispute still needs its reason: there the reason is the judgement.
 
 ## [0.13.0] - 2026-10-01
 

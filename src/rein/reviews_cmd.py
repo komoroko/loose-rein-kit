@@ -1,7 +1,7 @@
 """`rein reviews` — which reviews run, the one terminal path that changes them, and the record they are held to.
 
   rein reviews show [--json | --stage <drafting stage>]
-  rein reviews apply <file> --reason "why"
+  rein reviews apply <file> [--reason "why"]
   rein reviews restore
 
 `.rein/reviews.yaml` is outside the mandate's freeze (`models.Reviews`): which tools raise the
@@ -125,7 +125,7 @@ def adversarial_switched_off(events: Sequence[models.Event], *, since: int) -> l
         notes: list[str] = []
         was = at_start.adversarial(stage) if at_start is not None else None
         if at_start is not None and was is False:
-            notes.append(f"off when this round began (set {at_start.ts} by {at_start.actor}: {at_start.reason})")
+            notes.append(f"off when this round began (set {_by(at_start)})")
         for record in during:
             now = record.adversarial(stage)
             if now is None:
@@ -133,13 +133,17 @@ def adversarial_switched_off(events: Sequence[models.Event], *, since: int) -> l
             if now == was or (was is None and now):
                 was = now
                 continue
-            notes.append(
-                f"{'switched back on' if now else 'switched off'} {record.ts} by {record.actor}: {record.reason}"
-            )
+            notes.append(f"{'switched back on' if now else 'switched off'} {_by(record)}")
             was = now
         if notes:
             rows.append({"id": stage, "change": "; ".join(notes)})
     return rows
+
+
+def _by(record: Record) -> str:
+    """When and by whom a record was made, and why when it says."""
+    said = f"{record.ts} by {record.actor}"
+    return f"{said}: {record.reason}" if record.reason else said
 
 
 def binding_problem(repo: repo_mod.Repo) -> str:
@@ -151,7 +155,7 @@ def binding_problem(repo: repo_mod.Repo) -> str:
             return f"no {repo.reviews} — `rein sync` seeds the packaged one"
         return (
             f"{repo.reviews} is recorded nowhere in the audit chain, so nothing says a person chose it. "
-            "Apply it at your terminal: `rein reviews apply .rein/reviews.yaml --reason ...`"
+            "Apply it at your terminal: `rein reviews apply .rein/reviews.yaml`"
         )
     if live == last.digest:
         return ""
@@ -192,7 +196,7 @@ def _record_write(
         cycle_id=cycle_id,
         actor=actor,
         detail={
-            "reason": reason[:_REASON_MAX],
+            **({"reason": reason.strip()[:_REASON_MAX]} if reason.strip() else {}),
             "changes": list(changes),
             "document": dict(document),
             "digest": digests.of(document),
@@ -292,8 +296,6 @@ def apply(repo: repo_mod.Repo, document: Mapping[str, Any], reason: str, *, acto
     The caller is the one who established that a person is doing this — a terminal confirmation,
     or the dashboard's write session — and says which in `actor`.
     """
-    if not reason.strip():
-        raise ReviewsError("a change to which reviews run needs a reason — it is recorded, and acceptance reads it")
     store = store_mod.Store(repo)
     state = store.read_state()
     if state is None or not state.cycle_id:
@@ -421,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
     show.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     change = sub.add_parser("apply", help="replace reviews.yaml with <file>, confirmed at this terminal")
     change.add_argument("file", help="the reviews document to apply (YAML, the shape `show --json` prints)")
-    change.add_argument("--reason", required=True, help="why — recorded in the audit chain, shown at acceptance")
+    change.add_argument("--reason", default="", help="why, optional — recorded in the audit chain, shown at acceptance")
     change.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     back = sub.add_parser("restore", help="write back the reviews.yaml the audit chain records")
     back.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
@@ -454,9 +456,6 @@ def main(argv: list[str] | None = None) -> int:
             logger.error(
                 common.terminal_refusal("changing which reviews run", ui="change them in the Reviews view and Apply")
             )
-            return 2
-        if not args.reason.strip():
-            logger.error("--reason is empty — a change to which reviews run is recorded with why")
             return 2
         document = strict_yaml.load_mapping(Path(args.file).read_text(encoding="utf-8"), what=args.file)
         proposal = prepare(repo, document)

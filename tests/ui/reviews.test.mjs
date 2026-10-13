@@ -1,6 +1,6 @@
 // The reviews screen (CR-51): a lane per stage, each with what belongs to that stage alone, switched
 // in place, and the reviews dragged onto it from the palette and taken off with ×. The draft is
-// applied in one write with a reason. Nothing is required.
+// applied in one write, with a reason if one is given. Nothing is required.
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -86,8 +86,6 @@ test("a review taken off a lane is applied as the whole document, with the reaso
   const doc = app.window.document;
   await app.click('button[aria-label="remove simplification from build"]');
   assert.equal(doc.querySelector(`${LANE("build")} .chip[data-review="simplification"]`), null);
-  assert.ok(byText(doc, "Apply").disabled, "no reason, no write");
-
   await applyWith(app, "the team runs its own linter");
 
   assert.equal(posts.length, 1);
@@ -95,6 +93,17 @@ test("a review taken off a lane is applied as the whole document, with the reaso
   assert.equal(posts[0].reason, "the team runs its own linter");
   // Made against the version the screen was served, so a change that landed meanwhile is refused.
   assert.equal(posts[0].expect, "sha256:served");
+});
+
+test("a change is applied without a reason (CR-76)", async () => {
+  const { app, posts } = await reviewsScreen();
+  await app.click('button[aria-label="remove simplification from build"]');
+  await previewed(app);
+  await app.click({ text: "Apply" });
+
+  assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0].document.build.reviews, ["correctness"]);
+  assert.equal(posts[0].reason, "");
 });
 
 test("asking a lane's reviews in another order is a change the screen sends", async () => {
@@ -169,7 +178,7 @@ test("a custom review joins the palette, and deleting it takes it off every lane
   assert.deepEqual(posts[0].document.acceptance.reviews, []);
 });
 
-test("an edit says what it will change before it is applied, and why Apply waits", async () => {
+test("an edit says what it will change before it is applied", async () => {
   const { app, previews } = await reviewsScreen();
   const doc = app.window.document;
   assert.match(doc.querySelector(".pending").textContent, /No changes/);
@@ -183,8 +192,7 @@ test("an edit says what it will change before it is applied, and why Apply waits
   );
   assert.deepEqual(previews.at(-1).document.build.reviews, ["correctness"]);
   assert.equal(doc.querySelector(`${LANE("build")}`).dataset.changed, "yes");
-  assert.ok(byText(doc, "Apply").disabled);
-  assert.match(doc.querySelector(".pending").textContent, /Write a reason to apply/);
+  assert.ok(!byText(doc, "Apply").disabled, "a reason is not required");
 });
 
 test("a draft the server would refuse says why, and cannot be applied", async () => {
