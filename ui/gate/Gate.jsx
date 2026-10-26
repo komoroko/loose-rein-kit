@@ -183,6 +183,8 @@ function Naming({ naming, gate }) {
                     <div className="note">
                       decided in: {c.adr || "(no ADR recorded — the reversibility claim is unsupported)"}
                     </div>
+                    {c.rehearsal ? <div className="note">{c.rehearsal}</div> : null}
+                    {c.budget ? <div className="note">{c.budget}</div> : null}
                     {c.carried_from ? (
                       <div className="note">
                         unchanged since {c.carried_from} approved it — carried by this approval, not a stop

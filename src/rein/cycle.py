@@ -8,8 +8,9 @@ design, tasks, and tests describe one change, not the whole product. Closing a c
      §27). The four SSOT documents go with the docs because they *are* the record of what was
      decided and on what evidence — archiving the prose and dropping the evidence would leave a
      history of conclusions with no grounds.
-  2. Restores fresh scaffolds: the per-cycle documents from the payload this release ships, the
-     SSOT documents from the snapshot `init` took while they were pristine.
+  2. Restores fresh scaffolds from the payload this release ships: the per-cycle documents as
+     they are, `plan.yaml` with the new cycle id and the configured work branch filled in, and
+     `review.yaml` as it is.
   3. Resets state to a new cycle: every gate pending, phase back to `brief`, a fresh chain.
 
 `00-product-brief.md` and `05-current-state.md` persist — they are the product, not the cycle.
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import shutil
 from datetime import date
 
@@ -40,7 +42,6 @@ DOCS_DIR = "docs"
 #: and `cycle-close` restores from here, so "what a fresh cycle's documents are" has one answer and
 #: it is the running release's.
 SCAFFOLD_DOCS_PAYLOAD = "scaffold/docs"
-SCAFFOLD_REIN = ".rein/scaffold/rein"
 ARCHIVE_DIR = "docs/archive"
 
 #: Per-cycle deliverables under docs/: archived with the cycle, then restored from the payload for
@@ -72,34 +73,10 @@ PERSISTENT_DOCS: tuple[str, ...] = (
 CYCLE_STATE: tuple[str, ...] = ("plan.yaml", "state.yaml", "review.yaml", "events.ndjson")
 
 
-def snapshot_ssot(repo: repo_mod.Repo) -> bool:
-    """Copy the pristine SSOT documents aside, once. True if anything was taken.
-
-    **Only the SSOT.** `docs/` used to be snapshotted here too, and that copy was the bug: it was
-    taken once, at `init`, and nothing ever added to it — so a per-cycle document a later release
-    began shipping was archived by `cycle-close` and then not restored, because the snapshot taken
-    by an older release had no copy of it to restore from. Silently, since :func:`_restore` skips
-    what is absent. The per-cycle documents are packaged data, byte-identical to what `init` seeds,
-    so a per-repository copy of them was a duplicate that could only ever go stale; they are
-    restored from the payload now (:data:`SCAFFOLD_DOCS_PAYLOAD`), which is the same thing
-    `rein sync` does for the prompts, the schemas and the rules.
-
-    `plan.yaml` and `review.yaml` stay here because they are *not* the payload: `init` fills the
-    plan's cycle id and work branch, so this repository's pristine copy is the only one there is.
-
-    A no-op per target once its snapshot exists — re-running init after the documents are filled
-    must never overwrite the pristine copy.
-    """
-    took = False
-    state_dst = repo.path(SCAFFOLD_REIN)
-    state_dst.mkdir(parents=True, exist_ok=True)
-    for name in ("plan.yaml", "state.yaml", "review.yaml"):
-        src = repo.rein_dir / name
-        dst = state_dst / name
-        if src.is_file() and not dst.exists():
-            shutil.copy2(src, dst)
-            took = True
-    return took
+def fill_plan(text: str, cycle_id: str, branch: str) -> str:
+    """Fill plan.yaml's cycle block. Everything else stays empty — the phases fill it."""
+    text = re.sub(r"^(  id: )\S+", rf"\g<1>{cycle_id}", text, count=1, flags=re.MULTILINE)
+    return re.sub(r"^(  branch: )\S+", rf"\g<1>{branch}", text, count=1, flags=re.MULTILINE)
 
 
 def readiness(repo: repo_mod.Repo, *, abandon: bool = False) -> list[str]:
@@ -144,6 +121,14 @@ def readiness(repo: repo_mod.Repo, *, abandon: bool = False) -> list[str]:
         reviews_problem = str(exc)
     if reviews_problem:
         blockers.append(reviews_problem)
+    # The next cycle's plan is filled with it (`_restore`).
+    try:
+        config = store.read_config()
+    except models.DocumentError as exc:
+        blockers.append(str(exc))
+    else:
+        if config is None or not config.work_branch:
+            blockers.append("config.yaml names no `project.work_branch` — the next cycle's plan is filled with it")
 
     for gate in state.gate_ids:
         receipt = state.gate_receipt(gate)
@@ -188,7 +173,7 @@ def _archive(repo: repo_mod.Repo, rows: list[tuple[str, str, str]]) -> list[str]
     return moved
 
 
-def _restore(repo: repo_mod.Repo) -> list[str]:
+def _restore(repo: repo_mod.Repo, cycle_id: str, branch: str) -> list[str]:
     """Recreate fresh scaffolds for the next cycle, never overwriting an existing file.
 
     The per-cycle documents come from the payload, file by file, so every one this release ships
@@ -196,6 +181,13 @@ def _restore(repo: repo_mod.Repo) -> list[str]:
     document vanish at the first close after an upgrade. `CYCLE_DOCS` names directories as well as
     files (`tasks`, `test`, `decisions`), so membership is tested on the first path segment and the
     tree below it is written out entry by entry.
+
+    `plan.yaml` and `review.yaml` come from the payload too (#115). They used to come from a copy
+    `init` took into the repository, on the reasoning that `init` fills the plan's cycle id and work
+    branch so that copy was the only one there was. Both values are known here — the cycle being
+    opened and `config.yaml`'s work branch — and `review.yaml` was never filled at all. The copy
+    stayed at the release that ran `init`, so after a release changed the review schema every new
+    cycle opened on a `review.yaml` the installed schema refused, with the mandate blocked.
 
     A file already on disk is left alone: the archive is a `git mv`, so anything still there is
     something the move could not take, and overwriting it would destroy work.
@@ -213,11 +205,14 @@ def _restore(repo: repo_mod.Repo) -> list[str]:
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(blob)
         restored.append(str(dst.relative_to(repo.root)))
-    for name in ("plan.yaml", "review.yaml"):
-        src = repo.path(SCAFFOLD_REIN) / name
+    fresh = {
+        "plan.yaml": fill_plan(data.read_text("scaffold/rein/plan.yaml"), cycle_id, branch).encode("utf-8"),
+        "review.yaml": data.read_bytes("scaffold/rein/review.yaml"),
+    }
+    for name, blob in fresh.items():
         dst = repo.rein_dir / name
-        if src.exists() and not dst.exists():
-            shutil.copy2(src, dst)
+        if not dst.exists():
+            dst.write_bytes(blob)
             restored.append(str(dst.relative_to(repo.root)))
     return restored
 
@@ -318,6 +313,12 @@ def main(argv: list[str] | None = None) -> int:
     if carried is None:
         logger.error("the audit chain records no reviews.yaml to carry into the next cycle")
         return 1
+    # Read before anything moves, like the two above: the next cycle's plan is filled with it, and
+    # a close that found it gone after the archive would leave a cycle closed with nothing opened.
+    config = store.read_config()
+    if config is None or not config.work_branch:
+        logger.error("config.yaml names no `project.work_branch` — the next cycle's plan is filled with it")
+        return 1
 
     # The archive is assembled and recorded BEFORE the reset, so the closing event is the last
     # entry of the chain being archived rather than the first of a chain that has no history.
@@ -336,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
     moved = _archive(repo, rows)
     if args.abandon:
         _mark_abandoned(repo, f"{ARCHIVE_DIR}/{today}-{slug}", previous, reason)
-    restored = _restore(repo)
+    restored = _restore(repo, slug, config.work_branch)
 
     # Through the Central Store, not `atomic_write`. state.yaml is the document `gate_guard` rule 1
     # and AGENTS.md both describe as written only inside a transaction, and this — the reset that

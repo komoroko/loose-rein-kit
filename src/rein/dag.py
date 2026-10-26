@@ -114,12 +114,30 @@ class Task:
     #: The long commands the loop runs on the host before this task's gate (`operate`).
     operate: tuple[Mapping[str, Any], ...] = ()
     #: How many launches an irreversible task's approval covers (0: undeclared), and what one costs.
+    #: A budget raised after the mandate (`rein task attempts`) replaces the plan's.
     attempt_max: int = 0
     attempt_cost: str = ""
 
     @property
     def is_done(self) -> bool:
         return self.status == "done"
+
+    def budget(self) -> str:
+        """What this task's attempt budget covers and how much of it is used, in one sentence. "" = none.
+
+        Says what is counted, because it is not always the run the budget was priced for (#117). With
+        `operate` the loop starts the run and counts every start. Without it the run happens outside
+        the loop, and what is counted is implementation attempts: a run launched by hand is in no
+        count but the hand that launched it.
+        """
+        if not self.attempt_max:
+            return ""
+        if self.operate:
+            return f"covers {self.attempt_max} run(s), {self.attempts} used — each: {self.attempt_cost}"
+        return (
+            f"covers {self.attempt_max} implementation attempt(s), {self.attempts} used — each: {self.attempt_cost}. "
+            "No `operate` step, so the loop does not start the run itself and counts none of its launches"
+        )
 
 
 @dataclass(frozen=True)
@@ -292,6 +310,8 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
     # Scope added after the mandate (`rein task scope-add`) joins the frozen scope here for the same
     # reason: the guard, the dossier and the reviewers all read the one the graph carries.
     scope_added = state.task_scope_added if state is not None else {}
+    # A budget raised at the crossing (`rein task attempts`) replaces the frozen one the same way.
+    attempts_max = state.task_attempts_max if state is not None else {}
     # A premise observed false with a fallback swaps the criteria resting on it for the ones a
     # human approved with the mandate. The plan document is untouched — it is frozen, and its
     # fallback is part of what was frozen — so this is where the swap becomes the task's bar.
@@ -347,7 +367,7 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
                 env=t.env,
                 allow=t.allow,
                 operate=t.operate,
-                attempt_max=t.attempt_max,
+                attempt_max=attempts_max.get(t.id, t.attempt_max),
                 attempt_cost=t.attempt_cost,
             )
             for t in plan.tasks

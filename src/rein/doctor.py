@@ -1357,7 +1357,6 @@ _SSOT_MUST_COMMIT: tuple[str, ...] = (
     ".rein/events.ndjson",
     ".rein/rein.lock",
     ".rein/prompts/",
-    ".rein/scaffold/",
     "docs/",
 )
 

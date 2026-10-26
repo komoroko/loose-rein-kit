@@ -301,7 +301,8 @@ def test_the_reviewer_is_granted_its_findings_file_and_nothing_else(
 
     orch._read_batch(_reviewer(orch), [_T1])
 
-    assert "write(.rein/work/review.T-001.findings.json)" in launched[0], "the one file it is there to produce"
+    findings = Path(orch.root).absolute() / ".rein" / "work" / "review.T-001.findings.json"
+    assert f"write({findings})" in launched[0], "the one file it is there to produce"
     assert "--allow-all-tools" not in launched[0], "the reviewer was launched able to change the code it judges"
 
 
@@ -322,6 +323,30 @@ def test_a_reviewer_on_a_read_only_cli_can_still_write_its_findings(
     orch._read_batch(_reviewer(orch), [_T1])
 
     assert "--sandbox" in launched[0] and "workspace-write" in launched[0]
+
+
+def test_a_reviewer_that_changed_into_the_worktree_still_writes_where_the_loop_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#116: the findings path was relative. A reviewer reading the task in its worktree resolved it
+    there, under the worktree's own `.rein/work/`, and the loop blocked a finished review as "the
+    reviewer wrote no findings file"."""
+    orch = _batch_reader(tmp_path, monkeypatch)
+    worktree = Path(orch.root) / ".worktrees" / "T-001"
+    finding = {"severity": "must_fix", "statement": "the guard is gone", "anchor": "src/x.py:4"}
+
+    reviewer = reviewing(worktree, [finding], [])
+
+    def from_the_worktree(cmd: list[str], cwd: str | None = None, **kwargs: object) -> tuple[int, str]:
+        result: tuple[int, str] = reviewer(cmd, cwd=str(worktree), **kwargs)  # type: ignore[operator]
+        return result
+
+    monkeypatch.setattr(build_loop, "_run", from_the_worktree)
+
+    answered = orch._read_batch(_reviewer(orch), [_T1])
+
+    assert "the guard is gone" in answered["T-001"].send_back
+    assert not (worktree / ".rein" / "work").exists()
 
 
 def test_a_must_fix_finding_is_what_goes_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2525,6 +2550,29 @@ def test_a_landing_carries_only_the_questions_asked_of_its_own_attempt(tmp_path:
     state = store_mod.Store(repo).read_state()
     assert brief.residual_findings(state) == []
     assert state is not None and "handoff" not in state.raw["tasks"]["T-001"]
+
+
+def test_a_budget_raised_since_the_stop_earns_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`rein task attempts` changes nothing in the tree, so replaying the spent-budget verdict over the
+    same tree would refuse the very run the raise covers."""
+    loop = orchestrator(tmp_path)
+    _escalated(loop, "sha256:" + "a" * 64, kind="attempt_budget_spent")
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "sha256:" + "a" * 64)
+
+    def budget(entry: dict[str, object]) -> None:
+        store = store_mod.Store(loop.repo)
+        with store.transaction() as tx:
+            state = tx.store.read_state()
+            assert state is not None
+            tasks = dict(state.raw["tasks"])
+            tasks["T-001"] = {**tasks["T-001"], **entry}
+            tx.write("state", {**state.raw, "tasks": tasks})
+            tx.append("decision_declared", cycle_id=state.cycle_id, subject_ids=["T-001"], detail={"kind": "test"})
+
+    budget({"attempts": 2, "attempts_max": 2})
+    assert loop._already_answered(_task(), str(tmp_path)) is not None
+    budget({"attempts_max": 3})
+    assert loop._already_answered(_task(), str(tmp_path)) is None
 
 
 def test_a_moved_tree_earns_the_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -4,6 +4,46 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.15.0] - 2026-10-26
+
+**A minor release: the format moves to `rein-grounded-v13`, and every repository needs `rein sync
+--force`.** A task's entry in `state.yaml` gains `attempts_max`, `plan.yaml`'s
+`rehearsal` gains `scale`, and the acceptance brief in `review.yaml` gains
+`residuals.attempts_raised_after_mandate`. Four issues filed from one cycle on 0.14.1: two fixed where they start,
+two that changed decisions (CR-77 to CR-80).
+
+- **The next cycle's `plan.yaml` and `review.yaml` come from this release, not from `init` (#115).**
+  `cycle-close` restored them from `.rein/scaffold/rein/`, a copy `init` took once and nothing
+  refreshed. After 0.13.0 dropped `machine.security` from the review schema, every cycle opened on a
+  `review.yaml` the installed schema refused, with the mandate blocked before any drafting. Both are
+  built from the payload now: `review.yaml` as shipped, `plan.yaml` with the new cycle id and
+  `config.yaml`'s work branch. `init` takes no copy, and `.rein/scaffold/` is read by nothing; delete
+  it. A close is refused while `config.yaml` names no `project.work_branch`.
+- **A reviewer is told the findings path as an absolute path (#116).** It reads each task in its
+  worktree, which has a `.rein/work/` of its own; after it had changed directory there, the relative
+  path put the findings in the worktree, and the loop, reading under the root, blocked a finished
+  review as "the reviewer wrote no findings file". The integration reviewer gets the same.
+- **An attempt budget is raised at the crossing it prices (CR-78, #118).** `rein task attempts
+  T-NNN --max N [--reason …]` shows the runs used, the budget and the cost of one, asks `[y/N]` at a
+  terminal, and records `attempts_raised` beside the frozen plan; the plan, its digest and every
+  approval stand. It was a roll back to the mandate, nine of them for one task. A roll back that
+  unfreezes the plan hands the raised value back for `attempts.max`, and acceptance lists each raise.
+  A task stopped on a spent budget is asked again over the same tree once the budget covers it; one
+  the loop blocked still needs `rein task reset`, and the command says so. A done task is refused.
+- **The crossing screen says what the budget counts (CR-77, #117).** With `operate` it counts every
+  start of the run. Without it the loop never starts the run, so it counts implementation attempts,
+  and the screen now says that no launch of the run itself is in the count. A hand count that missed
+  one launch cost a roll back.
+- **A rehearsal states its scale, and the mandate screen says what it can show (CR-79, #118).**
+  `rehearsal.scale: {unit, rehearsal, run}` is required at the mandate. The screen prints the
+  smallest per-unit failure rate the rehearsal shows with 95% likelihood (1 − 0.05^(1/n)) beside
+  what the run meets at that rate. Rehearsals of a few items passed ahead of a run of several hundred
+  model calls, and the run stopped seven times on failures striking a few percent of calls.
+- **A design lens asks what the whole run does when a few percent of its calls fail (CR-80, #118).**
+  `L-DES-RUN-AT-SCALE`, conditional: over N calls a per-call rate p stops a run that tolerates none
+  with probability 1 − (1 − p)^N, and the design has to say whether it retries, resumes, or restarts
+  the stage.
+
 ## [0.14.1] - 2026-10-13
 
 **A patch release: nothing a repository runs changes format, and `rein sync` is enough.** A

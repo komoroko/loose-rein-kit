@@ -87,7 +87,9 @@ re-cutting the tasks, because a task's acceptance criteria are in the plan with 
 dependencies allow, re-running what went red, and adding a dependency edge the plan missed
 (`rein task order T-NNN --after T-MMM --reason "…"`, written beside the frozen plan and listed at
 acceptance). So does a test file a task's change drags along, inside what the frozen config allowed
-ahead of time (`rein task scope-add T-NNN <path> --reason "…"`, `guard.scope_additions`). Work set
+ahead of time (`rein task scope-add T-NNN <path> --reason "…"`, `guard.scope_additions`). Raising
+an irreversible task's attempt budget is the person's decision at that crossing, not a roll back
+(`rein task attempts T-NNN --max 5`, confirmed at their terminal). Work set
 aside is recorded, never worked around: a task deleted from the draft plan is `rein task defer`, and
 a cycle given up on is `rein cycle-close --abandon --reason "…"`.
 

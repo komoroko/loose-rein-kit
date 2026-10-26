@@ -319,6 +319,17 @@ export function OrientStage({ data, review, asBuilt, onAsBuilt }) {
       </tr>
     );
   }
+  // Attempt budgets a person raised at the crossing, without a roll back.
+  for (const a of residuals.attempts_raised_after_mandate || []) {
+    residualRows.push(
+      <tr key={"attempts:" + a.task_id}>
+        <td>budget raised after the mandate</td>
+        <td className="mono">
+          {a.task_id}: covers {a.max} run(s)
+        </td>
+      </tr>
+    );
+  }
   // Work taken out of the plan while it was a draft. Not delivered, and said so here.
   for (const d of residuals.deferred || []) {
     residualRows.push(

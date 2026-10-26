@@ -499,3 +499,23 @@ def test_a_task_that_never_landed_has_no_control_to_report() -> None:
     """Absence stays distinguishable from unmeasured: no section at all, not `discriminating: 0`."""
     state = models.State({**make_state(tasks={"T-001": "todo"}), "tasks": {"T-001": {"status": "todo"}}})
     assert "control" not in brief.derive(plan=None, state=state, config=_config())
+
+
+def test_every_change_made_after_the_freeze_is_a_residual_review_yaml_accepts() -> None:
+    """The residuals are written into review.yaml, whose schema refuses a key it does not name. A
+    raised budget (`rein task attempts`) was listed by `_residuals` and named nowhere in the schema,
+    so the acceptance review of a cycle that had raised one could not be stored."""
+    from tests._support import make_review
+
+    state = make_state(gates={"mandate": "approved", "T-001": "approved", "acceptance": "pending"})
+    state["tasks"] = {
+        "T-001": {"status": "done", "attempts": 3, "attempts_max": 4, "scope_added": ["tests/x.py"]},
+        "T-002": {"status": "todo", "after": ["T-001"]},
+    }
+    section = brief.derive(plan=None, state=models.State(state), config=None)
+    assert set(section["residuals"]) >= {
+        "attempts_raised_after_mandate",
+        "scope_added_after_mandate",
+        "ordered_after_mandate",
+    }
+    assert models.schema_errors(make_review(generated=True, brief=section), "review") == []

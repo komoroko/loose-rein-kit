@@ -1693,6 +1693,34 @@ def test_a_crossing_screen_names_only_the_task_about_to_run(tmp_path: Path) -> N
     assert approve.naming(repo, "acceptance")["crossing"] == []
 
 
+def _budgeted_crossing(repo_root: Path, *, operate: bool, raised: int = 0, used: int = 0) -> repo_mod.Repo:
+    task = _crossing_task("T-001")
+    task["attempts"] = {"max": 2, "cost": "a day of quota"}
+    if operate:
+        task["operate"] = [{"name": "full-run", "command": ["sh", "-c", "true"]}]
+    state = make_state(gates={"mandate": "approved", "T-001": "pending", "acceptance": "pending"})
+    entry: dict[str, object] = {"status": "todo", "attempts": used}
+    if raised:
+        entry["attempts_max"] = raised
+    state["tasks"] = {"T-001": entry}
+    return repo_at(repo_root, state=state, plan=make_plan(tasks=[task]))
+
+
+def test_the_crossing_screen_says_a_budget_without_operate_counts_no_launch_of_the_run(tmp_path: Path) -> None:
+    """#117: the run happened outside the loop and its launches were counted by hand; one was
+    missed. The screen showed "N used" as though the loop had counted them."""
+    [row] = approve.naming(_budgeted_crossing(tmp_path, operate=False), "T-001")["crossing"]
+    assert "2 implementation attempt(s)" in row["budget"]
+    assert "counts none of its launches" in row["budget"]
+    assert row["budget"] in approve.render_crossing([row])
+
+
+def test_the_crossing_screen_shows_a_raised_budget_and_the_runs_used(tmp_path: Path) -> None:
+    repo = _budgeted_crossing(tmp_path, operate=True, raised=5, used=2)
+    [row] = approve.naming(repo, "T-001")["crossing"]
+    assert row["budget"] == "covers 5 run(s), 2 used — each: a day of quota"
+
+
 # --- a gate that stops existing takes its change requests with it ------------------
 
 
@@ -2010,10 +2038,48 @@ def _irreversible_plan(**over: object) -> models.Plan:
 
 def test_an_irreversible_task_with_a_rehearsal_and_a_budget_is_ready() -> None:
     plan = _irreversible_plan(
-        rehearsal={"tasks": ["T-001"], "says": "ten real questions through every stage"},
+        rehearsal={
+            "tasks": ["T-001"],
+            "says": "ten real questions through every stage",
+            "scale": {"unit": "model calls", "rehearsal": 30, "run": 600},
+        },
         attempts={"max": 2, "cost": "about 7% of the weekly quota per run"},
     )
     assert approve._irreversible_blockers(plan, "mandate") == []
+
+
+def test_a_rehearsal_that_states_no_scale_is_not_ready() -> None:
+    """#118: rehearsals of a few items passed ahead of a run of several hundred calls, and the run
+    stopped seven times on failures striking a few percent of calls. Nothing at the mandate asked
+    whether the rehearsal could have shown one."""
+    plan = _irreversible_plan(rehearsal={"tasks": ["T-001"], "says": "x"}, attempts={"max": 1, "cost": "x"})
+    assert any("states no `scale`" in b for b in approve._irreversible_blockers(plan, "mandate"))
+
+
+def test_the_rehearsal_line_says_the_smallest_rate_it_is_likely_to_show() -> None:
+    task = models.Task(
+        {
+            "id": "T-002",
+            "rehearsal": {
+                "tasks": ["T-001"],
+                "says": "x",
+                "scale": {"unit": "model calls", "rehearsal": 30, "run": 600},
+            },
+        }
+    )
+    line = approve.rehearsal_line(task)
+    # 1 - 0.05^(1/30) = 9.5%: a failure that rare or rarer is likely to slip through 30 calls, and
+    # the run of 600 meets about 57 at that rate.
+    assert "make 30 model calls, the run 600" in line
+    assert "9.5% or more" in line and "about 57" in line
+    # A run smaller than the rehearsal meets fewer than one failure at that rate, not "about 0".
+    small = models.Task(
+        {"id": "T-002", "rehearsal": {"tasks": ["T-001"], "scale": {"unit": "calls", "rehearsal": 300, "run": 50}}}
+    )
+    assert approve.rehearsal_line(small).endswith("a rate the run is likely not to meet")
+    assert approve.rehearsal_line(models.Task({"id": "T-002", "rehearsal": {"waived": "no smaller form"}})) == (
+        "rehearsal waived: no smaller form"
+    )
 
 
 def test_an_irreversible_task_with_neither_is_not() -> None:

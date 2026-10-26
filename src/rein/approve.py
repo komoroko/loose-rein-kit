@@ -162,6 +162,12 @@ def _irreversible_blockers(plan: models.Plan | None, gate: str) -> list[str]:
     data for the first time at its irreversible task and found three defects there, each costing a
     full run and a roll back, all of which a ten-question run would have shown.
 
+    **Its scale.** How much the rehearsal does against the run, in one unit (#118). "The same path,
+    smaller" was met by rehearsals of a few items ahead of a run of several hundred model calls, and
+    each passed while the run stopped on the next failure striking a few percent of calls: at that
+    size such a failure seldom happens. The approval screen turns the two numbers into the smallest
+    rate the rehearsal is likely to show (`rehearsal_line`).
+
     **An attempt budget.** How many launches the approval covers and what one costs. The approval
     was otherwise open-ended: every retry spent more of a resource the approver had priced once.
     """
@@ -183,6 +189,11 @@ def _irreversible_blockers(plan: models.Plan | None, gate: str) -> list[str]:
                 blockers.append(f"{task.id}'s rehearsal {rid} is not something {task.id} waits for (`blocked_by`)")
             elif by_id[rid].irreversible_surfaces:
                 blockers.append(f"{task.id}'s rehearsal {rid} is itself irreversible — a rehearsal has to be undoable")
+        if rehearsal.get("tasks") and not isinstance(rehearsal.get("scale"), dict):
+            blockers.append(
+                f"{task.id}'s rehearsal states no `scale` — how many of one unit (calls, records) it makes "
+                "against how many the run makes, so the approval screen can say what failure rate it can show"
+            )
         if task.attempt_max <= 0:
             blockers.append(
                 f"{task.id} is irreversible and declares no `attempts` — how many launches this approval covers "
@@ -1891,6 +1902,13 @@ def crossing_declarations(repo: repo_mod.Repo, gate: str) -> list[dict[str, str]
         # A damaged chain carries nothing: readiness refuses the approval over it anyway.
         if not defects:
             carried = carried_crossings(repo, events, plan, store_mod.Store(repo).read_config())
+    # The budget as it stands, not as the plan froze it: one raised at the crossing
+    # (`rein task attempts`) and the runs already used are in the state.
+    try:
+        graph: dag.Graph | None = dag.join(plan, store_mod.Store(repo).read_state())
+        unjoined = ""
+    except (dag.DagError, models.DocumentError) as exc:
+        graph, unjoined = None, f"budget unknown — the task graph does not join: {exc}"
     rows: list[dict[str, str]] = []
     for task in plan.tasks:
         if task.id not in wanted:
@@ -1908,9 +1926,38 @@ def crossing_declarations(repo: repo_mod.Repo, gate: str) -> list[dict[str, str]
                     "adr": str(entry.get("adr", "")),
                     # The human confirmation this approval carries back, or "" for a stop to come.
                     "carried_from": carried[task.id][0] if task.id in carried else "",
+                    "rehearsal": rehearsal_line(task),
+                    "budget": graph.get(task.id).budget() if graph is not None else unjoined,
                 }
             )
     return rows
+
+
+def rehearsal_line(task: models.Task) -> str:
+    """What `task`'s rehearsal can show, from the scale the plan declares. "" when there is none.
+
+    A failure striking each unit with probability p shows in n units with probability 1 - (1 - p)^n,
+    so the smallest rate the rehearsal shows 95% of the time is 1 - 0.05^(1/n), about 3/n. That rate
+    is printed beside what the run would meet at it: a rehearsal of 30 calls before a run of 600
+    shows a failure at 9.5% or more, which the run meets about 57 times, and is likely to miss a 1% one.
+    """
+    rehearsal = task.rehearsal
+    if rehearsal.get("waived"):
+        return f"rehearsal waived: {rehearsal['waived']}"
+    tasks = rehearsal.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        return ""
+    scale = rehearsal.get("scale")
+    if not isinstance(scale, dict):
+        return f"rehearsal: {', '.join(map(str, tasks))} — no scale stated"
+    made, run, unit = int(scale["rehearsal"]), int(scale["run"]), str(scale["unit"])
+    shown = 1 - 0.05 ** (1 / made)
+    met = run * shown
+    return (
+        f"rehearsal: {', '.join(map(str, tasks))} make {made} {unit}, the run {run} (as the plan declares). "
+        f"A failure per one of them shows there with 95% likelihood only at {shown:.1%} or more — "
+        + (f"a rate at which the run meets about {met:.0f}" if met >= 1 else "a rate the run is likely not to meet")
+    )
 
 
 def render_crossing(rows: Sequence[Mapping[str, str]]) -> str:
@@ -1919,6 +1966,10 @@ def render_crossing(rows: Sequence[Mapping[str, str]]) -> str:
         lines.append(f"  - {row['task_id']} {row['title']}")
         lines.append(f"      cannot be undone: {row['name']} ({row['kind']})")
         lines.append(f"      decided in: {row['adr'] or '(no ADR recorded — the reversibility claim is unsupported)'}")
+        if row.get("rehearsal"):
+            lines.append(f"      {row['rehearsal']}")
+        if row.get("budget"):
+            lines.append(f"      {row['budget']}")
         if row.get("carried_from"):
             lines.append(
                 f"      unchanged since {row['carried_from']} approved it — carried by this approval, not a stop"
