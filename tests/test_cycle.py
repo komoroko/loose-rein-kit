@@ -143,24 +143,48 @@ def test_the_next_state_carries_only_the_project_identity(tmp_path: Path) -> Non
 # --- the snapshot -------------------------------------------------------------
 
 
-def test_the_ssot_snapshot_is_taken_once_and_never_overwritten(tmp_path: Path) -> None:
-    repo = finished_repo(tmp_path)
-    assert cycle.snapshot_ssot(repo) is True
-    pristine = tmp_path / ".rein" / "scaffold" / "rein" / "plan.yaml"
-    assert pristine.exists()
-    before = pristine.read_text(encoding="utf-8")
+def test_the_next_cycles_plan_and_review_come_from_this_release_not_from_init(tmp_path: Path) -> None:
+    """#115: `cycle-close` restored them from a copy `init` took, which stayed at that release. After
+    the review schema dropped `machine.security`, every new cycle opened on a `review.yaml` the
+    installed schema refused. A copy left by such an `init` is not read any more."""
+    from rein import data as data_mod
 
-    (tmp_path / ".rein" / "plan.yaml").write_text("tasks: []\n", encoding="utf-8")
-    cycle.snapshot_ssot(repo)
-    assert pristine.read_text(encoding="utf-8") == before  # the pristine copy survived
+    repo = finished_repo(tmp_path)
+    stale = tmp_path / ".rein" / "scaffold" / "rein"
+    stale.mkdir(parents=True)
+    stale_review = "status: not_generated\nmachine:\n  security: { findings: [] }\n"
+    (stale / "review.yaml").write_text(stale_review, encoding="utf-8")
+    (stale / "plan.yaml").write_text("cycle:\n  id: from-init\n", encoding="utf-8")
+    (tmp_path / ".rein" / "plan.yaml").unlink()
+    (tmp_path / ".rein" / "review.yaml").unlink()
+
+    restored = cycle._restore(repo, "payment", "build/demo")
+
+    assert {".rein/plan.yaml", ".rein/review.yaml"} <= set(restored)
+    review = strict_yaml.load_mapping(repo.review.read_text(encoding="utf-8"), what="review.yaml")
+    assert models.schema_errors(review, "review") == []
+    assert repo.review.read_bytes() == data_mod.read_bytes("scaffold/rein/review.yaml")
+    plan = strict_yaml.load_mapping(repo.plan.read_text(encoding="utf-8"), what="plan.yaml")
+    assert models.schema_errors(plan, "plan") == []
+    assert plan["cycle"]["id"] == "payment"
+    assert plan["cycle"]["branch"] == "build/demo"
+
+
+def test_a_config_with_no_work_branch_blocks_the_close(tmp_path: Path) -> None:
+    """The next cycle's plan is filled with it, and the archive is moved before that happens."""
+    repo = finished_repo(tmp_path)
+    config = strict_yaml.load_mapping(repo.config.read_text(encoding="utf-8"), what="config.yaml")
+    del config["project"]["work_branch"]
+    repo.config.write_bytes(store_mod.dump_yaml(config))
+    assert any("work_branch" in b for b in cycle.readiness(repo))
 
 
 def test_the_per_cycle_documents_are_not_copied_into_the_repository(tmp_path: Path) -> None:
     """They are packaged data, so a per-repository copy could only ever go stale — which is what
     made a document the release began shipping vanish at the first close after an upgrade."""
     repo = finished_repo(tmp_path)
-    cycle.snapshot_ssot(repo)
-    assert not (tmp_path / ".rein" / "scaffold" / "docs").exists()
+    cycle._restore(repo, "payment", "build/demo")
+    assert not (tmp_path / ".rein" / "scaffold").exists()
 
 
 def test_a_document_this_release_ships_is_restored_even_in_an_older_repository(tmp_path: Path) -> None:
@@ -179,7 +203,7 @@ def test_a_document_this_release_ships_is_restored_even_in_an_older_repository(t
         elif doc.exists():
             doc.unlink()
 
-    restored = cycle._restore(repo)
+    restored = cycle._restore(repo, "payment", "build/demo")
 
     prefix = len("scaffold/docs/")
     shipped = {rel[prefix:] for rel, _ in data_mod.iter_files("scaffold/docs")}
@@ -194,7 +218,7 @@ def test_restoring_never_overwrites_a_document_the_archive_could_not_take(tmp_pa
     kept = tmp_path / "docs" / "retrospective.md"
     kept.write_text("work the git mv could not take\n", encoding="utf-8")
 
-    cycle._restore(repo)
+    cycle._restore(repo, "payment", "build/demo")
 
     assert kept.read_text(encoding="utf-8") == "work the git mv could not take\n"
 
@@ -211,7 +235,6 @@ def test_close_archives_resets_and_records(tmp_path: Path) -> None:
     repo = finished_repo(tmp_path, git=True, events=chain("cycle_initialized"))
     _git(tmp_path, "config", "user.email", "t@e.x")
     _git(tmp_path, "config", "user.name", "T")
-    cycle.snapshot_ssot(repo)
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-q", "-m", "baseline")
 
@@ -258,7 +281,6 @@ def test_the_reset_state_is_schema_valid_and_lands_with_its_event(tmp_path: Path
     repo = finished_repo(tmp_path, git=True, events=chain("cycle_initialized"))
     _git(tmp_path, "config", "user.email", "t@e.x")
     _git(tmp_path, "config", "user.name", "T")
-    cycle.snapshot_ssot(repo)
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-q", "-m", "baseline")
 

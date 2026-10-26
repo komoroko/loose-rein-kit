@@ -2,7 +2,7 @@
 
 The copy-the-template model is gone: this command writes everything a repo needs *from the
 package payload*, so the working tree gains only state — `.rein/` (SSOT + materialized
-prompts/schema/rules + scaffold snapshot + lock) and `docs/` (deliverable scaffolds) — plus a
+prompts/schema/rules + lock) and `docs/` (deliverable scaffolds) — plus a
 marker-guarded pointer block in AGENTS.md and the runtime-artifact block in `.gitignore` (the
 scratch the loop regenerates every run, kept current afterwards by `rein sync`). Nothing else
 is touched: no pyproject rewrite, no makefile. The agent surface is asked for on a TTY (it is
@@ -87,12 +87,6 @@ def fill_state(text: str, project: str, cycle_id: str, today: str) -> str:
     text = re.sub(r'^(project: ").*(")', rf"\g<1>{project}\g<2>", text, count=1, flags=re.MULTILINE)
     text = re.sub(r"^(cycle_id: )\S+", rf"\g<1>{cycle_id}", text, count=1, flags=re.MULTILINE)
     return re.sub(r"^(updated_at: ).*$", rf'\g<1>"{today}"', text, count=1, flags=re.MULTILINE)
-
-
-def fill_plan(text: str, cycle_id: str, branch: str) -> str:
-    """Fill plan.yaml's cycle block. Everything else stays empty — the phases fill it."""
-    text = re.sub(r"^(  id: )\S+", rf"\g<1>{cycle_id}", text, count=1, flags=re.MULTILINE)
-    return re.sub(r"^(  branch: )\S+", rf"\g<1>{branch}", text, count=1, flags=re.MULTILINE)
 
 
 def fill_config(text: str, project: str, branch: str) -> str:
@@ -438,7 +432,7 @@ def run_init(
     # 1) the four SSOT documents, placeholder-filled (never overwriting an existing file).
     cycle_id = _cycle_slug(name)
     state_text = fill_state(data_mod.read_text("scaffold/rein/state.yaml"), name, cycle_id, today)
-    plan_text = fill_plan(data_mod.read_text("scaffold/rein/plan.yaml"), cycle_id, branch)
+    plan_text = cycle.fill_plan(data_mod.read_text("scaffold/rein/plan.yaml"), cycle_id, branch)
     config_text = fill_config(data_mod.read_text("scaffold/rein/config.yaml"), name, branch)
     if brownfield:
         config_text = brownfield_config(config_text, test_cmd, check_cmd)
@@ -483,12 +477,7 @@ def run_init(
     rc = install_mod.sync(repo)
     if rc != 0:
         return rc
-    # 4) the pristine SSOT snapshot cycle-close restores from. The per-cycle documents are not
-    #    copied aside: `cycle-close` restores those straight from the payload, so they follow the
-    #    release instead of freezing at whatever this repository was initialized with.
-    if cycle.snapshot_ssot(repo):
-        print(f"  snapshot      pristine SSOT → {cycle.SCAFFOLD_REIN}")
-    # 5) the agent-neutral rules pointer (AGENTS.md), appended at most once — and never in the
+    # 4) the agent-neutral rules pointer (AGENTS.md), appended at most once — and never in the
     #    template repo, whose own AGENTS.md *is* the rules body (a pointer to itself would be a
     #    second, contradictory load, the way `rein install claude` skips the CLAUDE.md block).
     agents_md = root / "AGENTS.md"
@@ -502,7 +491,7 @@ def run_init(
         print("  merge         AGENTS.md (Loose Rein pointer block appended)")
     # (the runtime-artifact .gitignore block is written by the `sync` call in step 3)
     print(f"  {_switch_branch(root, branch)}")
-    # 6) the agent surface and the sandboxes — offered here rather than left for a printed
+    # 5) the agent surface and the sandboxes — offered here rather than left for a printed
     #    suggestion (the surface) or a later `doctor` FAIL (the sandbox) to raise. Both are
     #    preconditions for the "Next:" line below: /req is a command the surface installs, and
     #    /build runs repository code. The surface goes first because it is the cheap one and the

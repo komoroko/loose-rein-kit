@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from rein import init_cmd
+from rein import cycle, init_cmd
 from rein import lock as lock_mod
 
 _STATE = """---
@@ -62,7 +62,7 @@ def test_fill_state_fills_placeholders_and_keeps_comments() -> None:
 
 
 def test_fill_plan_and_config_fill_their_own_placeholders() -> None:
-    plan = init_cmd.fill_plan("cycle:\n  id: cycle-1\n  branch: build/product\n", "demo-cycle", "build/demo")
+    plan = cycle.fill_plan("cycle:\n  id: cycle-1\n  branch: build/product\n", "demo-cycle", "build/demo")
     assert "id: demo-cycle" in plan and "branch: build/demo" in plan
     config = init_cmd.fill_config("project:\n  name: product\n  work_branch: build/product\n", "demo", "build/demo")
     assert "name: demo" in config and "work_branch: build/demo" in config
@@ -174,13 +174,11 @@ def test_run_init_seeds_a_bare_directory(tmp_path: Path, capsys: pytest.CaptureF
     # The four SSOT documents, each valid against its own schema (seeded from the scaffold).
     for name in ("plan", "state", "review", "config"):
         assert (tmp_path / ".rein" / f"{name}.yaml").exists()
-    # Docs scaffolds, and the pristine SSOT snapshot cycle-close restores the plan from. The
-    # per-cycle documents are NOT copied aside: they are packaged data, and a per-repository copy
-    # of them could only go stale — `cycle-close` restores those from the payload.
+    # Docs scaffolds. Nothing is copied aside for `cycle-close`: it restores from the payload, and a
+    # per-repository copy could only go stale (#115).
     assert (tmp_path / "docs" / "00-product-brief.md").is_file()
     assert (tmp_path / "docs" / "10-requirements.md").is_file()
-    assert (tmp_path / ".rein" / "scaffold" / "rein" / "plan.yaml").is_file()
-    assert not (tmp_path / ".rein" / "scaffold" / "docs").exists()
+    assert not (tmp_path / ".rein" / "scaffold").exists()
     # Materialized artifacts (repo-relative — the wrappers' @-imports depend on these paths).
     assert (tmp_path / ".rein" / "prompts" / "commands" / "req.md").is_file()
     assert (tmp_path / ".rein" / "AGENTS.rein.md").is_file()
