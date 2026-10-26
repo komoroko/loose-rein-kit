@@ -301,7 +301,8 @@ def test_the_reviewer_is_granted_its_findings_file_and_nothing_else(
 
     orch._read_batch(_reviewer(orch), [_T1])
 
-    assert "write(.rein/work/review.T-001.findings.json)" in launched[0], "the one file it is there to produce"
+    findings = Path(orch.root).absolute() / ".rein" / "work" / "review.T-001.findings.json"
+    assert f"write({findings})" in launched[0], "the one file it is there to produce"
     assert "--allow-all-tools" not in launched[0], "the reviewer was launched able to change the code it judges"
 
 
@@ -322,6 +323,30 @@ def test_a_reviewer_on_a_read_only_cli_can_still_write_its_findings(
     orch._read_batch(_reviewer(orch), [_T1])
 
     assert "--sandbox" in launched[0] and "workspace-write" in launched[0]
+
+
+def test_a_reviewer_that_changed_into_the_worktree_still_writes_where_the_loop_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#116: the findings path was relative. A reviewer reading the task in its worktree resolved it
+    there, under the worktree's own `.rein/work/`, and the loop blocked a finished review as "the
+    reviewer wrote no findings file"."""
+    orch = _batch_reader(tmp_path, monkeypatch)
+    worktree = Path(orch.root) / ".worktrees" / "T-001"
+    finding = {"severity": "must_fix", "statement": "the guard is gone", "anchor": "src/x.py:4"}
+
+    reviewer = reviewing(worktree, [finding], [])
+
+    def from_the_worktree(cmd: list[str], cwd: str | None = None, **kwargs: object) -> tuple[int, str]:
+        result: tuple[int, str] = reviewer(cmd, cwd=str(worktree), **kwargs)  # type: ignore[operator]
+        return result
+
+    monkeypatch.setattr(build_loop, "_run", from_the_worktree)
+
+    answered = orch._read_batch(_reviewer(orch), [_T1])
+
+    assert "the guard is gone" in answered["T-001"].send_back
+    assert not (worktree / ".rein" / "work").exists()
 
 
 def test_a_must_fix_finding_is_what_goes_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

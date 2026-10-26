@@ -1988,11 +1988,14 @@ class Orchestrator:
         argv = step.agent_argv or self.config.adapter_argv
         target = dossier.findings_path(self.root, _BATCH_REVIEW_SUBJECT.format(ids="+".join(ids)))
         target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
-        findings_rel = f"{dossier.RELATIVE_PATH}/{target.name}"
+        # Absolute (#116). The reviewer reads each subject in its worktree, which has a `.rein/work/`
+        # of its own: once it had changed directory there, a relative path put the findings in the
+        # worktree, and the loop, reading under the root, blocked a finished review as a missing one.
+        findings_file = str(target.absolute())
         prompt = build_prompts.batch_review_prompt(
             [self._review_subject(task) for task in subjects],
             gate_cmds=self.config.gate_cmds,
-            findings_path=findings_rel,
+            findings_path=findings_file,
             reviews=step.reviews,
             questions=self.config.questions,
             # Keyed on the argv this step is launched with, not the default one: offering a
@@ -2008,7 +2011,7 @@ class Orchestrator:
             # `REVIEW`, not `WRITE`: the findings file is the only thing it needs to produce, and
             # naming it is what lets an adapter that can scope a write grant exactly that one.
             self._launch(
-                adapters.command(argv, prompt, access=adapters.REVIEW, writable=findings_rel),
+                adapters.command(argv, prompt, access=adapters.REVIEW, writable=findings_file),
                 cwd=self.root,
                 where=f"{', '.join(ids)}: the '{step.name}' agent step",
                 role=role,
@@ -2019,7 +2022,7 @@ class Orchestrator:
             by_task, missing = dossier.parse_batch_findings(target.read_text(encoding="utf-8"), ids)
         except FileNotFoundError:
             unreadable = (
-                f"the reviewer wrote no findings file ({findings_rel}). "
+                f"the reviewer wrote no findings file ({findings_file}). "
                 "A review that produced nothing readable is not a review that found nothing."
             )
             return {task_id: ReviewAnswer(stop=f"{task_id}: {unreadable}") for task_id in ids}
@@ -3523,7 +3526,7 @@ class Orchestrator:
         rounds = max(0, step.retries)
         for attempt in range(rounds + 1):
             target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
-            findings_rel = f"{dossier.RELATIVE_PATH}/{target.name}"
+            findings_file = str(target.absolute())  # absolute for the same reason as `_read_batch`'s (#116)
             self._launch(
                 adapters.command(
                     step.agent_argv or self.config.adapter_argv,
@@ -3531,7 +3534,7 @@ class Orchestrator:
                         ids,
                         gate_cmds=self.config.gate_cmds,
                         diff_cmd=f"git diff {before_join}..HEAD",
-                        findings_path=findings_rel,
+                        findings_path=findings_file,
                         reviews=step.reviews,
                         questions=self.config.questions,
                         disciplines=adapters.disciplines_for(step.agent_argv or self.config.adapter_argv),
@@ -3539,7 +3542,7 @@ class Orchestrator:
                         lenses_proposed=self._code_lenses[1],
                     ),
                     access=adapters.REVIEW,
-                    writable=findings_rel,
+                    writable=findings_file,
                 ),
                 cwd=self.root,
                 where=f"{ids}: the '{step.name}' agent step over the merged tree",
@@ -3548,7 +3551,7 @@ class Orchestrator:
             if not target.exists():
                 raise StopLoop(
                     f"{ids}: the integration reviewer wrote no findings file "
-                    f"({dossier.RELATIVE_PATH}/{target.name}). A review that produced nothing "
+                    f"({findings_file}). A review that produced nothing "
                     "readable is not a review that found nothing."
                 )
             try:
