@@ -263,6 +263,32 @@ def test_close_archives_resets_and_records(tmp_path: Path) -> None:
     assert (tmp_path / "docs" / "10-requirements.md").exists()
 
 
+@pytest.mark.integration
+def test_a_copy_an_older_init_left_does_not_open_the_next_cycle(tmp_path: Path) -> None:
+    """#115 end to end: `init` copied plan.yaml and review.yaml aside and `cycle-close` restored the
+    copy, which stayed at the release that ran `init`. Once the review schema moved, every new cycle
+    opened on a `review.yaml` the installed schema refused, and on a plan with `init`'s cycle id."""
+    repo = finished_repo(tmp_path, git=True, events=chain("cycle_initialized"))
+    stale = tmp_path / ".rein" / "scaffold" / "rein"
+    stale.mkdir(parents=True)
+    (stale / "review.yaml").write_text("status: not_generated\nmachine:\n  security: { findings: [] }\n")
+    (stale / "plan.yaml").write_text("schema_version: 1\ncycle:\n  id: from-init\n  branch: build/old\n")
+    _git(tmp_path, "config", "user.email", "t@e.x")
+    _git(tmp_path, "config", "user.name", "T")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "baseline")
+
+    assert cycle.main(["--name", "payment", "--repo", str(tmp_path)]) == 0
+
+    review = strict_yaml.load_mapping(repo.review.read_text(encoding="utf-8"), what="review.yaml")
+    assert models.schema_errors(review, "review") == []
+    plan = strict_yaml.load_mapping(repo.plan.read_text(encoding="utf-8"), what="plan.yaml")
+    assert models.schema_errors(plan, "plan") == []
+    config = store_mod.Store(repo).read_config()
+    assert config is not None
+    assert plan["cycle"] == {**plan["cycle"], "id": "payment", "branch": config.work_branch}
+
+
 def test_a_reviews_yaml_the_chain_does_not_record_blocks_the_close(tmp_path: Path) -> None:
     """Carried into the next chain as it stands, an unrecorded change would come out recorded."""
     repo = finished_repo(tmp_path)

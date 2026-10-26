@@ -1952,10 +1952,11 @@ def rehearsal_line(task: models.Task) -> str:
         return f"rehearsal: {', '.join(map(str, tasks))} — no scale stated"
     made, run, unit = int(scale["rehearsal"]), int(scale["run"]), str(scale["unit"])
     shown = 1 - 0.05 ** (1 / made)
+    met = run * shown
     return (
         f"rehearsal: {', '.join(map(str, tasks))} make {made} {unit}, the run {run} (as the plan declares). "
         f"A failure per one of them shows there with 95% likelihood only at {shown:.1%} or more — "
-        f"a rate at which the run meets about {run * shown:.0f}"
+        + (f"a rate at which the run meets about {met:.0f}" if met >= 1 else "a rate the run is likely not to meet")
     )
 
 

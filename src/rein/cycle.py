@@ -313,6 +313,12 @@ def main(argv: list[str] | None = None) -> int:
     if carried is None:
         logger.error("the audit chain records no reviews.yaml to carry into the next cycle")
         return 1
+    # Read before anything moves, like the two above: the next cycle's plan is filled with it, and
+    # a close that found it gone after the archive would leave a cycle closed with nothing opened.
+    config = store.read_config()
+    if config is None or not config.work_branch:
+        logger.error("config.yaml names no `project.work_branch` — the next cycle's plan is filled with it")
+        return 1
 
     # The archive is assembled and recorded BEFORE the reset, so the closing event is the last
     # entry of the chain being archived rather than the first of a chain that has no history.
@@ -331,8 +337,6 @@ def main(argv: list[str] | None = None) -> int:
     moved = _archive(repo, rows)
     if args.abandon:
         _mark_abandoned(repo, f"{ARCHIVE_DIR}/{today}-{slug}", previous, reason)
-    config = store.read_config()
-    assert config is not None  # `readiness` refused a missing one
     restored = _restore(repo, slug, config.work_branch)
 
     # Through the Central Store, not `atomic_write`. state.yaml is the document `gate_guard` rule 1

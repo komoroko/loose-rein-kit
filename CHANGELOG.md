@@ -7,8 +7,9 @@ new one). `pyproject.toml [project] version` is the single version source.
 ## [0.15.0] - 2026-10-26
 
 **A minor release: the format moves to `rein-grounded-v13`, and every repository needs `rein sync
---force`.** A task's entry in `state.yaml` gains `attempts_max`, and `plan.yaml`'s
-`rehearsal` gains `scale`. Four issues filed from one cycle on 0.14.1: two fixed where they start,
+--force`.** A task's entry in `state.yaml` gains `attempts_max`, `plan.yaml`'s
+`rehearsal` gains `scale`, and the acceptance brief in `review.yaml` gains
+`residuals.attempts_raised_after_mandate`. Four issues filed from one cycle on 0.14.1: two fixed where they start,
 two that changed decisions (CR-77 to CR-80).
 
 - **The next cycle's `plan.yaml` and `review.yaml` come from this release, not from `init` (#115).**
@@ -27,7 +28,8 @@ two that changed decisions (CR-77 to CR-80).
   terminal, and records `attempts_raised` beside the frozen plan; the plan, its digest and every
   approval stand. It was a roll back to the mandate, nine of them for one task. A roll back that
   unfreezes the plan hands the raised value back for `attempts.max`, and acceptance lists each raise.
-  A task stopped on a spent budget is asked again over the same tree once the budget covers it.
+  A task stopped on a spent budget is asked again over the same tree once the budget covers it; one
+  the loop blocked still needs `rein task reset`, and the command says so. A done task is refused.
 - **The crossing screen says what the budget counts (CR-77, #117).** With `operate` it counts every
   start of the run. Without it the loop never starts the run, so it counts implementation attempts,
   and the screen now says that no launch of the run itself is in the count. A hand count that missed

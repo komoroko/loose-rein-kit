@@ -2072,6 +2072,11 @@ def test_the_rehearsal_line_says_the_smallest_rate_it_is_likely_to_show() -> Non
     # the run of 600 meets about 57 at that rate.
     assert "make 30 model calls, the run 600" in line
     assert "9.5% or more" in line and "about 57" in line
+    # A run smaller than the rehearsal meets fewer than one failure at that rate, not "about 0".
+    small = models.Task(
+        {"id": "T-002", "rehearsal": {"tasks": ["T-001"], "scale": {"unit": "calls", "rehearsal": 300, "run": 50}}}
+    )
+    assert approve.rehearsal_line(small).endswith("a rate the run is likely not to meet")
     assert approve.rehearsal_line(models.Task({"id": "T-002", "rehearsal": {"waived": "no smaller form"}})) == (
         "rehearsal waived: no smaller form"
     )

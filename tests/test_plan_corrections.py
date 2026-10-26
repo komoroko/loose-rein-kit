@@ -533,7 +533,9 @@ def test_keep_is_reachable_from_the_cli(tmp_path: Path, capsys: pytest.CaptureFi
 # --- an attempt budget is raised at the crossing it prices (CR-78, #118) ---------------------------
 
 
-def _crossing_repo(tmp_path: Path, *, used: int = 2, plan_status: str = "frozen") -> repo_mod.Repo:
+def _crossing_repo(
+    tmp_path: Path, *, used: int = 2, plan_status: str = "frozen", status: str = "blocked"
+) -> repo_mod.Repo:
     crossing = make_task(
         "T-001",
         claim_ids=["C-001"],
@@ -545,7 +547,7 @@ def _crossing_repo(tmp_path: Path, *, used: int = 2, plan_status: str = "frozen"
     state = make_state(
         plan_status=plan_status, gates={"mandate": "approved", "T-001": "approved", "acceptance": "pending"}
     )
-    state["tasks"] = {"T-001": {"status": "blocked", "attempts": used}}
+    state["tasks"] = {"T-001": {"status": status, "attempts": used}}
     seed_repo(tmp_path, plan=make_plan(tasks=[crossing]), state=state)
     return repo_mod.Repo(tmp_path)
 
@@ -606,6 +608,19 @@ def test_a_raise_is_refused_where_it_is_not_one(tmp_path: Path, monkeypatch: pyt
     plain = _repo(tmp_path / "plain", _tasks())
     with pytest.raises(ValueError, match="crosses no irreversible point"):
         task_cmd.attempts(plain, "T-001", max_runs=4, reason="")
+    done = _crossing_repo(tmp_path / "done", status="done")
+    with pytest.raises(ValueError, match="no run is left"):
+        task_cmd.attempts(done, "T-001", max_runs=4, reason="")
+
+
+def test_a_raise_over_a_task_the_spent_budget_blocked_says_it_still_needs_a_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The loop blocks a task whose run budget ran out; the raise alone leaves it blocked."""
+    _at_a_terminal(monkeypatch)
+    _crossing_repo(tmp_path)
+    assert task_cmd.main(["attempts", "T-001", "--max", "4", "--repo", str(tmp_path)]) == 0
+    assert "rein task reset T-001" in capsys.readouterr().out
 
 
 def test_a_raised_budget_returns_to_the_plan_on_a_roll_back_to_the_mandate(

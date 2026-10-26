@@ -204,8 +204,9 @@ def _keep_once(repo: repo_mod.Repo, task_id: str, reason: str) -> str:
     return commit
 
 
-def attempts(repo: repo_mod.Repo, task_id: str, *, max_runs: int, reason: str) -> None:
-    """Raise how many runs an irreversible task's approval covers, confirmed at a terminal.
+def attempts(repo: repo_mod.Repo, task_id: str, *, max_runs: int, reason: str) -> str:
+    """Raise how many runs an irreversible task's approval covers, confirmed at a terminal. Returns
+    the task's status, which the raise does not move.
 
     **No roll back, by design.** `attempts.max` sits in the frozen plan, so raising it used to be
     `rein revise --to mandate`: a fresh mandate approval and a fresh crossing approval, for a
@@ -216,7 +217,8 @@ def attempts(repo: repo_mod.Repo, task_id: str, *, max_runs: int, reason: str) -
     and every receipt bound to it stand.
 
     Only a raise, and only above what has been used: a budget is lowered by not running. Refused
-    while the plan is a draft (edit `attempts.max` there) and for a task that crosses nothing.
+    while the plan is a draft (edit `attempts.max` there), for a task that crosses nothing, and for
+    one that is done.
     """
     store = store_mod.Store(repo)
     state, plan = store.read_state(), store.read_plan()
@@ -227,6 +229,8 @@ def attempts(repo: repo_mod.Repo, task_id: str, *, max_runs: int, reason: str) -
     if task_id not in state.crossing_gates:
         raise ValueError(f"{task_id} crosses no irreversible point: it has no attempt budget to raise")
     task = dag.join(plan, state).get(task_id)
+    if task.is_done:
+        raise ValueError(f"{task_id} is done: no run is left for a budget to cover")
     if max_runs > _ATTEMPTS_CEILING:
         raise ValueError(f"an approval covers at most {_ATTEMPTS_CEILING} runs, as `attempts.max` does in the plan")
     if max_runs <= task.attempt_max:
@@ -241,6 +245,7 @@ def attempts(repo: repo_mod.Repo, task_id: str, *, max_runs: int, reason: str) -
     if not common.ask_yes_no(f"Cover {max_runs - task.attempt_max} more run(s) of {task_id}?"):
         raise ValueError("nothing was raised")
     store_mod.retry_on_stale(lambda: _attempts_once(repo, task_id, task.attempt_max, max_runs, reason))
+    return task.status
 
 
 def _attempts_once(repo: repo_mod.Repo, task_id: str, confirmed: int, max_runs: int, reason: str) -> None:
@@ -674,11 +679,15 @@ def _attempts_main(args: argparse.Namespace) -> int:
     reason = args.reason.strip()
     try:
         repo = repo_mod.get(args.repo)
-        attempts(repo, args.task_id.strip(), max_runs=args.max, reason=reason)
+        status = attempts(repo, args.task_id.strip(), max_runs=args.max, reason=reason)
     except (repo_mod.RepoNotFoundError, OSError, ValueError, models.DocumentError, store_mod.StoreError) as exc:
         logger.error(str(exc))
         return 1
     print(f"{args.task_id} is covered for {args.max} run(s) — the plan and its approval stand")
+    if status == "blocked":
+        # Where the loop stopped it for the spent budget (`_count_priced_run`): the raise alone
+        # does not move the status, and a blocked task is not started.
+        print(f"It is blocked: `rein task reset {args.task_id.strip()} --reason …` lets `rein build` start it again")
     return 0
 
 
