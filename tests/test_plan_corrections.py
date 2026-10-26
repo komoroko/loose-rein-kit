@@ -528,3 +528,96 @@ def test_keep_is_reachable_from_the_cli(tmp_path: Path, capsys: pytest.CaptureFi
     assert task_cmd.main(["keep", "T-001", "--reason", "paths only", "--repo", str(tmp_path)]) == 0
     assert "T-001: needs-revision → done" in capsys.readouterr().out
     assert task_cmd.main(["keep", "T-001", "--reason", " ", "--repo", str(tmp_path)]) == 2
+
+
+# --- an attempt budget is raised at the crossing it prices (CR-78, #118) ---------------------------
+
+
+def _crossing_repo(tmp_path: Path, *, used: int = 2, plan_status: str = "frozen") -> repo_mod.Repo:
+    crossing = make_task(
+        "T-001",
+        claim_ids=["C-001"],
+        operator_surface=[
+            {"kind": "persistence", "name": "the users table", "paths": ["db/x.sql"], "reversible": False}
+        ],
+    )
+    crossing["attempts"] = {"max": 2, "cost": "a day of quota"}
+    state = make_state(
+        plan_status=plan_status, gates={"mandate": "approved", "T-001": "approved", "acceptance": "pending"}
+    )
+    state["tasks"] = {"T-001": {"status": "blocked", "attempts": used}}
+    seed_repo(tmp_path, plan=make_plan(tasks=[crossing]), state=state)
+    return repo_mod.Repo(tmp_path)
+
+
+def _at_a_terminal(monkeypatch: pytest.MonkeyPatch, answer: bool = True) -> None:
+    from rein import common
+
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(common, "ask_yes_no", lambda prompt: answer)
+
+
+def test_a_budget_is_raised_without_touching_the_plan_or_any_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#118: every raise was a roll back to the mandate — nine of them for one task."""
+    repo = _crossing_repo(tmp_path)
+    store = store_mod.Store(repo)
+    plan_before = repo.plan.read_bytes()
+    gates_before = store.read_state().raw["gates"]  # type: ignore[union-attr]
+    _at_a_terminal(monkeypatch)
+
+    task_cmd.attempts(repo, "T-001", max_runs=4, reason="")
+
+    assert repo.plan.read_bytes() == plan_before
+    assert store.read_state().raw["gates"] == gates_before  # type: ignore[union-attr]
+    assert dag.load(repo).get("T-001").attempt_max == 4
+    recorded = store.read_events()[-1]
+    assert recorded.event == "decision_declared"
+    assert recorded.detail == {"kind": "attempts_raised", "from": 2, "to": 4, "used": 2}
+    residuals = brief.derive(plan=None, state=store.read_state(), config=None)["residuals"]
+    assert residuals["attempts_raised_after_mandate"] == [{"task_id": "T-001", "max": 4}]
+
+
+def test_a_raise_needs_a_terminal_and_a_yes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """It spends what a person priced, so an agent's captured subprocess cannot do it."""
+    from rein import common
+
+    repo = _crossing_repo(tmp_path)
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: False)
+    with pytest.raises(ValueError, match="needs a confirmation typed at a terminal"):
+        task_cmd.attempts(repo, "T-001", max_runs=4, reason="")
+    _at_a_terminal(monkeypatch, answer=False)
+    with pytest.raises(ValueError, match="nothing was raised"):
+        task_cmd.attempts(repo, "T-001", max_runs=4, reason="")
+    assert dag.load(repo).get("T-001").attempt_max == 2
+
+
+def test_a_raise_is_refused_where_it_is_not_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _at_a_terminal(monkeypatch)
+    repo = _crossing_repo(tmp_path)
+    with pytest.raises(ValueError, match="has to exceed it"):
+        task_cmd.attempts(repo, "T-001", max_runs=2, reason="")
+    with pytest.raises(ValueError, match="at most 20 runs"):
+        task_cmd.attempts(repo, "T-001", max_runs=21, reason="")
+    draft = _crossing_repo(tmp_path / "draft", plan_status="draft")
+    with pytest.raises(ValueError, match="the plan is a draft"):
+        task_cmd.attempts(draft, "T-001", max_runs=4, reason="")
+    plain = _repo(tmp_path / "plain", _tasks())
+    with pytest.raises(ValueError, match="crosses no irreversible point"):
+        task_cmd.attempts(plain, "T-001", max_runs=4, reason="")
+
+
+def test_a_raised_budget_returns_to_the_plan_on_a_roll_back_to_the_mandate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _crossing_repo(tmp_path)
+    _at_a_terminal(monkeypatch)
+    task_cmd.attempts(repo, "T-001", max_runs=4, reason="the quota stop was ours")
+
+    revision = revise.plan_revision(repo, "mandate", [])
+    assert revision["returned_attempts"] == ["T-001: 4"]
+    revise.apply(repo, revision, "re-cut")
+
+    state = store_mod.Store(repo).read_state()
+    assert state is not None and "attempts_max" not in state.raw["tasks"]["T-001"]

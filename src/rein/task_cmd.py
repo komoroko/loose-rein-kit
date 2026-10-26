@@ -53,6 +53,9 @@ RESETTABLE_TO = ("todo", "needs-revision")
 
 _REASON_MAX = 500
 
+#: The plan schema's ceiling on `attempts.max`, which a raise keeps (`state.schema.json`'s `attempts_max`).
+_ATTEMPTS_CEILING = 20
+
 
 @dataclass(frozen=True)
 class ResetResult:
@@ -199,6 +202,68 @@ def _keep_once(repo: repo_mod.Repo, task_id: str, reason: str) -> str:
         tx.write("state", raw, expect_digest=seen)
         tx.append("decision_declared", cycle_id=state.cycle_id, subject_ids=[task_id], detail=detail)
     return commit
+
+
+def attempts(repo: repo_mod.Repo, task_id: str, *, max_runs: int, reason: str) -> None:
+    """Raise how many runs an irreversible task's approval covers, confirmed at a terminal.
+
+    **No roll back, by design.** `attempts.max` sits in the frozen plan, so raising it used to be
+    `rein revise --to mandate`: a fresh mandate approval and a fresh crossing approval, for a
+    decision about one crossing (#118 counted nine such roll backs for one task). What the budget
+    prices is that crossing's runs, and the crossing is the point a person already approves with
+    the cost in front of them. So the raise is asked here, with the runs used, the budget, and the
+    cost of one on the screen, and written beside the frozen plan in `state.yaml`; the plan's digest
+    and every receipt bound to it stand.
+
+    Only a raise, and only above what has been used: a budget is lowered by not running. Refused
+    while the plan is a draft (edit `attempts.max` there) and for a task that crosses nothing.
+    """
+    store = store_mod.Store(repo)
+    state, plan = store.read_state(), store.read_plan()
+    if state is None or plan is None:
+        raise ValueError("no .rein/state.yaml or .rein/plan.yaml — run `rein init` first")
+    if state.plan_status != "frozen":
+        raise ValueError(f"the plan is a draft: set `attempts.max` for {task_id} in plan.yaml")
+    if task_id not in state.crossing_gates:
+        raise ValueError(f"{task_id} crosses no irreversible point: it has no attempt budget to raise")
+    task = dag.join(plan, state).get(task_id)
+    if max_runs > _ATTEMPTS_CEILING:
+        raise ValueError(f"an approval covers at most {_ATTEMPTS_CEILING} runs, as `attempts.max` does in the plan")
+    if max_runs <= task.attempt_max:
+        raise ValueError(f"{task_id}'s approval already covers {task.attempt_max} run(s): a raise has to exceed it")
+    if not common.stdin_is_terminal():
+        raise ValueError(common.terminal_refusal(f"raising {task_id}'s attempt budget (`rein task attempts`)"))
+    print(common.terminal_text(f"{task_id}  {task.title}"))
+    print(f"  runs used:      {task.attempts}")
+    print(f"  covered now:    {task.attempt_max}")
+    print(f"  covered after:  {max_runs}")
+    print(common.terminal_text(f"  each run costs: {task.attempt_cost}"))
+    if not common.ask_yes_no(f"Cover {max_runs - task.attempt_max} more run(s) of {task_id}?"):
+        raise ValueError("nothing was raised")
+    store_mod.retry_on_stale(lambda: _attempts_once(repo, task_id, task.attempt_max, max_runs, reason))
+
+
+def _attempts_once(repo: repo_mod.Repo, task_id: str, confirmed: int, max_runs: int, reason: str) -> None:
+    store = store_mod.Store(repo)
+    state, plan = store.read_state(), store.read_plan()
+    if state is None or plan is None:
+        raise ValueError("no .rein/state.yaml or .rein/plan.yaml — run `rein init` first")
+    task = dag.join(plan, state).get(task_id)
+    if task.attempt_max != confirmed:
+        raise ValueError(
+            f"{task_id}'s budget moved to {task.attempt_max} while you were confirming {confirmed}: run it again"
+        )
+    seen = store_mod.read_digest(state)
+    raw = json.loads(json.dumps(state.raw))
+    entry = raw.setdefault("tasks", {}).setdefault(task_id, {"status": task.status})
+    entry["attempts_max"] = max_runs
+    raw["updated_at"] = event_chain.now_iso()
+    detail: dict[str, Any] = {"kind": "attempts_raised", "from": confirmed, "to": max_runs, "used": task.attempts}
+    if reason:
+        detail["reason"] = reason[:_REASON_MAX]
+    with store.transaction() as tx:
+        tx.write("state", raw, expect_digest=seen)
+        tx.append("decision_declared", cycle_id=state.cycle_id, subject_ids=[task_id], detail=detail)
 
 
 def _artifact_paths(criterion: Any) -> list[str]:
@@ -493,6 +558,13 @@ def main(argv: list[str] | None = None) -> int:
     keep_parser.add_argument("task_id", help="the task the roll back marked (T-NNN)")
     keep_parser.add_argument("--reason", required=True, help="why it is unaffected — recorded in the audit chain")
     keep_parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
+    attempts_parser = sub.add_parser(
+        "attempts", help="raise how many runs an irreversible task's approval covers — no roll back"
+    )
+    attempts_parser.add_argument("task_id", help="the task that crosses the irreversible point (T-NNN)")
+    attempts_parser.add_argument("--max", required=True, type=int, help="the runs the approval covers from now on")
+    attempts_parser.add_argument("--reason", default="", help="why, if you want it on record — kept in the audit chain")
+    attempts_parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     defer_parser = sub.add_parser(
         "defer", help="record that a task deleted from the draft plan was taken out of this cycle"
     )
@@ -509,6 +581,8 @@ def main(argv: list[str] | None = None) -> int:
         return _scope_add_main(args)
     if args.action == "keep":
         return _keep_main(args)
+    if args.action == "attempts":
+        return _attempts_main(args)
 
     reason = args.reason.strip()
     if not reason:
@@ -593,6 +667,18 @@ def _keep_main(args: argparse.Namespace) -> int:
         logger.error(str(exc))
         return 1
     print(f"{args.task_id}: needs-revision → done, on {commit[:12]} ({reason})")
+    return 0
+
+
+def _attempts_main(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    try:
+        repo = repo_mod.get(args.repo)
+        attempts(repo, args.task_id.strip(), max_runs=args.max, reason=reason)
+    except (repo_mod.RepoNotFoundError, OSError, ValueError, models.DocumentError, store_mod.StoreError) as exc:
+        logger.error(str(exc))
+        return 1
+    print(f"{args.task_id} is covered for {args.max} run(s) — the plan and its approval stand")
     return 0
 
 

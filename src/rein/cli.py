@@ -111,7 +111,11 @@ VERBS: dict[str, Verb] = {
         "what each cycle committed to and what it could touch, oldest cycle first",
     ),
     "events": Verb("events", "read the hash-chained audit log (--cost sums what runs billed)", human=False),
-    "task": Verb("task_cmd", "task reset|keep <id> --reason … — retry a task, or keep a marked done one", human=False),
+    "task": Verb(
+        "task_cmd",
+        "task reset|keep|attempts <id> … — retry, keep a marked done task, or raise a crossing's budget",
+        human=False,
+    ),
     "guard": Verb("gate_guard", "the gate-guard hook / commit-stage check", human=False),
     "policy-check": Verb("policy_check", "base-side CI meta-policy (rejects head weakening)", human=False),
     "issue-sync": Verb("issue_sync", "one-way mirror of plan.yaml's tasks -> GitHub Issues (opt-in)", human=False),

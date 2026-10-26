@@ -326,6 +326,31 @@
                 },
                 "says": {
                   "$ref": "#/$defs/label"
+                },
+                "scale": {
+                  "description": "How much the rehearsal does against the run, counted in one unit: the thing a failure strikes one at a time (model calls, records, requests). Required at the mandate. The approval screen turns it into the smallest per-unit failure rate the rehearsal is likely to show, beside what the run meets at that rate, so a rehearsal too small to show the failures that stop the run is seen as one before it is approved.",
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "unit",
+                    "rehearsal",
+                    "run"
+                  ],
+                  "properties": {
+                    "unit": {
+                      "$ref": "#/$defs/label"
+                    },
+                    "rehearsal": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 100000000
+                    },
+                    "run": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 100000000
+                    }
+                  }
                 }
               }
             },
@@ -344,7 +369,7 @@
           ]
         },
         "attempts": {
-          "description": "Required of a task that declares an irreversible `operator_surface`: how many runs the approval covers, and what one costs in the terms that matter here (quota, money, data moved). A run is one start of the task's `operate` steps when it has them — every start counts, including the ones a red step or a reviewer's finding sends it round for — and one implementation attempt when it does not. The loop does not start one past `max`; raising it is a change to what was approved. Where one failure anywhere stops the whole run, say so in `cost` with the numbers — a run that needs n checks each passing with probability p passes with p^n.",
+          "description": "Required of a task that declares an irreversible `operator_surface`: how many runs the approval covers, and what one costs in the terms that matter here (quota, money, data moved). A run is one start of the task's `operate` steps when it has them — every start counts, including the ones a red step or a reviewer's finding sends it round for — and one implementation attempt when it does not. The loop does not start one past `max`. After the mandate, `rein task attempts` raises it as a decision about this crossing alone, confirmed at a terminal, without a roll back. Where one failure anywhere stops the whole run, say so in `cost` with the numbers — a run that needs n checks each passing with probability p passes with p^n.",
           "type": "object",
           "additionalProperties": false,
           "required": [

@@ -3063,6 +3063,12 @@ class Orchestrator:
             paths = [str(p) for p in recorded.get("paths", []) if isinstance(p, str)]
             if paths and not dossier.scope_violations(current, paths):
                 return None
+        if kind == "attempt_budget_spent":
+            # The same for a budget raised since (`rein task attempts`): the tree is unchanged, and
+            # the run the raise covers is the one replaying the old answer would refuse.
+            current = next((t for t in self._load_graph().tasks if t.id == task.id), task)
+            if current.attempts < current.attempt_max:
+                return None
         return kind, str(recorded.get("message", "")), tree
 
     def _run_task_to_done(self, task: dag.Task, cwd: str, review: str = "") -> tuple[bool, str]:
@@ -3318,9 +3324,8 @@ class Orchestrator:
         if current.attempt_max and current.attempts >= current.attempt_max:
             return (
                 f"{task.id} has used the {current.attempt_max} run(s) its approval covers "
-                f"(each: {current.attempt_cost}); its operate steps are not started again. Raising the "
-                f"budget changes what was approved: `rein revise --to mandate`, then change `attempts.max` "
-                f"for {task.id}."
+                f"(each: {current.attempt_cost}); its operate steps are not started again. To cover more: "
+                f"`rein task attempts {task.id} --max <n>`, then `rein task reset {task.id} --reason …`."
             )
         self._set_status(task.id, "in-progress")
         print(
@@ -4161,8 +4166,8 @@ class Orchestrator:
             self._escalate(
                 "attempt_budget_spent",
                 f"{task.id} has used the {task.attempt_max} launch(es) its approval covers "
-                f"(each: {task.attempt_cost}). Not launched again. Raising the budget changes what "
-                f"was approved: `rein revise --to mandate`, then change `attempts.max` for {task.id}.",
+                f"(each: {task.attempt_cost}). Not launched again. To cover more: "
+                f"`rein task attempts {task.id} --max <n>`.",
                 task=task.id,
             )
 
@@ -4501,7 +4506,7 @@ class Orchestrator:
         for task in waiting:
             print(f"  {task.id}  {task.title}")
             if task.attempt_max:
-                print(f"      covers {task.attempt_max} launch(es), {task.attempts} used — each: {task.attempt_cost}")
+                print(f"      {task.budget()}")
         print(
             "\nThe plan froze this work as something that cannot be taken back, so it is its own\n"
             "contact point and the loop stops in front of it. Running it first would make the\n"

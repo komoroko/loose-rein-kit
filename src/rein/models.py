@@ -1527,6 +1527,18 @@ class State:
         return {k: _ids(v, "after") for k, v in value.items() if isinstance(v, dict) and _ids(v, "after")}
 
     @property
+    def task_attempts_max(self) -> Mapping[str, int]:
+        """Attempt budgets raised after the mandate (`rein task attempts`): task id → the new `max`."""
+        value = self.raw.get("tasks")
+        if not isinstance(value, dict):
+            return {}
+        return {
+            k: v["attempts_max"]
+            for k, v in value.items()
+            if isinstance(v, dict) and isinstance(v.get("attempts_max"), int)
+        }
+
+    @property
     def task_scope_added(self) -> Mapping[str, tuple[str, ...]]:
         """Paths added to a frozen task's scope (`rein task scope-add`): task id → the paths."""
         value = self.raw.get("tasks")

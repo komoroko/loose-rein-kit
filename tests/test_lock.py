@@ -46,8 +46,8 @@ _PROSE_KEYS = frozenset({"description", "title", "$comment", "examples"})
 #: the earlier shape. A digest moving under a version somebody has installed is the failure this
 #: pin exists to catch, and it is not this.
 _FORMAT_PIN: tuple[str, str] = (
-    "rein-grounded-v12",
-    "sha256:d969b979f824e8c988d0aa539a9d8906a48ea3122a3129c91d89cd01b3506e93",
+    "rein-grounded-v13",
+    "sha256:6bfe6b0a8e36a789c5e3a4d1ca0cbdaaddf273a01024955d17d20c998eafafa0",
 )
 
 

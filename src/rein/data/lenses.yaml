@@ -105,6 +105,19 @@ lenses:
     when:
       min_claims: 1
     origin: packaged
+  - id: L-DES-RUN-AT-SCALE
+    stage: design
+    class: conditional
+    attack: >-
+      Take a stage that makes many external calls and let a few percent of them fail, come back
+      truncated, or hit a quota. Over N calls a per-call rate p stops a run that tolerates none with
+      probability 1 - (1 - p)^N. What does the whole run do — retry, resume where it stopped, or start
+      the stage over — and does the design say which?
+    applies_when: the design has a stage making many calls to a model or a remote service, each of
+      which can fail on its own. Whether it does is in the design document, not the plan.
+    when:
+      min_claims: 1
+    origin: packaged
   - id: L-DES-INFEASIBILITY
     stage: design
     class: standard

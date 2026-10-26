@@ -178,6 +178,12 @@
             "minimum": 0,
             "maximum": 1000
           },
+          "attempts_max": {
+            "description": "How many runs an irreversible task's approval now covers, raised after the mandate with `rein task attempts`. It replaces the frozen plan's `attempts.max` for this task. Raising it is a decision about this crossing alone, confirmed at a terminal with the runs used and the cost of one in front of the person, so it needs no roll back; each raise is recorded in the chain and listed at acceptance.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
           "completed_commit": {
             "$ref": "#/$defs/commit"
           },

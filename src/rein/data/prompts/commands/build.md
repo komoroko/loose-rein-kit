@@ -40,7 +40,8 @@ loop decomposes, reorders and re-runs as it needs to.
    **A task with `operate` is read before its run**, by the same agent steps, on its own: its run is
    the costly part (hours, real data, or the irreversible act), and a finding answered after it
    would send the task round the run again. Every start of the run after the first in one attempt
-   is recorded as an attempt of its own, and one past the task's `attempts.max` is not started. A step already established green against **this exact tree, in this exact image** is reused
+   is recorded as an attempt of its own, and one past the task's `attempts.max` is not started. Covering
+   more runs is the human's `rein task attempts <id> --max <n>`, never a roll back you propose. A step already established green against **this exact tree, in this exact image** is reused
    rather than re-run (the evidence ledger). Then the **negative control**: the steps that run the tests
    (`runs_tests: true` — never a linter, whose red is true of any new test file) are re-established
    over the base this change is a change to, with **only the task's test half applied**. If every step is still green, no test in the change exercises it and the green that

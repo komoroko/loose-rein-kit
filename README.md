@@ -425,6 +425,10 @@ Most of the situations below surface there.
 - **A task has to wait for another the plan did not say it waits for** — add the edge with
   `rein task order T-NNN --after T-MMM --reason "…"`. Order is not part of what the mandate
   approved, so this needs no roll back; the edge is recorded and shown at acceptance.
+- **An irreversible task has used every run its approval covers** — if another run is worth its
+  cost, cover it with `rein task attempts T-NNN --max 5` at your terminal. The budget prices that
+  crossing alone, so this needs no roll back; the raise is recorded and shown at acceptance. A task
+  the spent budget blocked then goes back with `rein task reset`.
 - **A task sits at `awaiting-evidence`** — one of its acceptance criteria is marked `external`: a
   staging check, a device, a person. `rein evidence show` lists every external criterion and
   whether it has been observed; the work is merged and the task waits until somebody records what

@@ -2552,6 +2552,29 @@ def test_a_landing_carries_only_the_questions_asked_of_its_own_attempt(tmp_path:
     assert state is not None and "handoff" not in state.raw["tasks"]["T-001"]
 
 
+def test_a_budget_raised_since_the_stop_earns_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`rein task attempts` changes nothing in the tree, so replaying the spent-budget verdict over the
+    same tree would refuse the very run the raise covers."""
+    loop = orchestrator(tmp_path)
+    _escalated(loop, "sha256:" + "a" * 64, kind="attempt_budget_spent")
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "sha256:" + "a" * 64)
+
+    def budget(entry: dict[str, object]) -> None:
+        store = store_mod.Store(loop.repo)
+        with store.transaction() as tx:
+            state = tx.store.read_state()
+            assert state is not None
+            tasks = dict(state.raw["tasks"])
+            tasks["T-001"] = {**tasks["T-001"], **entry}
+            tx.write("state", {**state.raw, "tasks": tasks})
+            tx.append("decision_declared", cycle_id=state.cycle_id, subject_ids=["T-001"], detail={"kind": "test"})
+
+    budget({"attempts": 2, "attempts_max": 2})
+    assert loop._already_answered(_task(), str(tmp_path)) is not None
+    budget({"attempts_max": 3})
+    assert loop._already_answered(_task(), str(tmp_path)) is None
+
+
 def test_a_moved_tree_earns_the_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Something changed since that verdict — another task merged, a human edited — so the question
     is not the one that was answered."""
