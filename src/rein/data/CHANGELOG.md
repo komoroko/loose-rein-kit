@@ -4,6 +4,63 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.16.0] - 2026-10-29
+
+**A minor release: the format moves to `rein-grounded-v14`, and there is no migration for a cycle in
+flight.** `plan.yaml`'s `tasks` is replaced by `issues`, each holding its `sub_issues`, so a plan
+written by 0.15.0 does not read: finish a running cycle on 0.15.0, or `rein revise --to mandate` and
+re-cut its tasks into issues. A repository between cycles needs `rein sync --force`. `state.yaml`
+gains a sub-issue's `unbundled`, the event log gains `bundle_landed` and `bundle_split`, and
+`config.yaml` gains `project.language`. Seven change requests (CR-81 to CR-87).
+
+- **The plan has two levels: issues, and the sub-issues a human approves (CR-81).** A sub-issue is
+  what a task was, less its place in the DAG: scope, criteria, claims and irreversible declarations,
+  frozen with the mandate, and the unit findings are charged to. An issue (`I-NNN`) carries `kind`
+  and the edges to other issues, which every one of its sub-issues waits on; a sub-issue's own
+  `blocked_by` names only its siblings, and an edge into another issue is refused with the issue edge
+  to write instead. Sub-issue ids stay `T-NNN`, and so do their tickets and crossing gates. A ticket
+  per issue was considered and not taken: a crossing binds its ticket's digest, and a shared document
+  would have asked for that approval again whenever a sibling's section moved.
+- **The loop decides how an issue's sub-issues share a launch (CR-82).** A *bundle* is a contiguous
+  run of one issue's sub-issues, in plan order, that are `todo` and wait on nothing outside it that is
+  not done: one worktree, one implementer launch, one gate over all their criteria, one commit. Never
+  bundled: a sub-issue that crosses an irreversible point, has `operate` or `requires`, is produced
+  by a person, or was split from a bundle before. Grouping changes nothing anybody approved, so it is
+  not frozen and moves no gate. The implementer is handed every member's ticket; each member's
+  criteria are named `T-NNN/A-n` inside the bundle and come back under their own ids when it lands,
+  and `bundle_landed` records which sub-issues one commit carries.
+- **A bundle that does not land is split, not judged (CR-83).** A red gate, a refusal before it, a
+  merge that will not go, or a red join sends every member back to `todo` with `unbundled` saying
+  why; none is `blocked`, and the lead's handoff goes with the bundle, so a fresh launch at it alone
+  does not inherit its siblings' failure. The bundle's branch is kept under `-bundle-<stamp>` rather
+  than salvaged into the lead's next attempt. Each sub-issue is then decided by its own launch.
+  Acceptance lists every sub-issue that ran alone after a split (`split_from_bundles`), and `rein
+  events --cost` says how many bundles split and how many sub-issues ran again.
+- **A bundle is one slice of the stack (CR-84).** `rein pr-stack` accepts several sub-issues on one
+  `completed_commit` when the chain's `bundle_landed` says one launch carried them, and the slice
+  names the issue and every member; without that record it is refused as before. A repair at
+  acceptance lands on the slice of the bundle its finding's sub-issue rode in. A slice per issue was
+  not taken: parallel issues land interleaved on the work branch, so one issue's commits are not a
+  contiguous run, and cutting them so would rewrite the history every receipt binds.
+- **Issues are mirrored as GitHub issues with sub-issues (CR-85).** `rein issue-sync` creates each
+  issue, then each sub-issue under it (`gh issue create --parent`), and moves a sub-issue back under
+  its issue when GitHub has it elsewhere. An issue closes when every sub-issue is done. It needs gh
+  2.103 or later and stops before creating anything on an older one: a mirror with the hierarchy
+  missing would show the work flat and say nothing.
+- **The Board opens an issue onto its sub-issues (CR-86).** The graph and the layer bars are drawn at
+  the issue level; an issue opens onto its sub-issues with status, criteria, whether each may share a
+  launch, and the commit it landed in, and a sub-issue opens onto its detail, criteria included.
+  Picking a sub-issue from the frontier or the trace opens its issue too, and what is open survives
+  the stream re-rendering the page.
+- **The documents are written in a language the repository chose (CR-87).** `project.language` in
+  `config.yaml` (a BCP 47 tag, `en` by default) is what `docs/**` and the plan's prose are written in.
+  `rein init` asks for it after the name and the brief, Enter meaning `en`, and takes `--language`
+  otherwise; a value that is not a tag is refused before anything is written. The prompts used to say
+  "the user's language", which made one repository's documents change language with whoever was
+  typing. Conversation stays in the person's language, and what the code prints stays English. **A
+  repository that wrote its documents in another language reads `en` once it upgrades**: set
+  `project.language: ja` (or its tag) in `config.yaml`.
+
 ## [0.15.0] - 2026-10-26
 
 **A minor release: the format moves to `rein-grounded-v13`, and every repository needs `rein sync
