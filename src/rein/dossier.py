@@ -131,6 +131,7 @@ def build(
             "kind": task.kind,
             "risk": task.risk,
             "scope": {"include": list(task.scope_include), "exclude": list(task.scope_exclude)},
+            **({"issue": task.issue_id, "carries": list(task.members)} if task.members else {}),
         },
         "claims": claims,
         "acceptance": _acceptance(task),
@@ -334,8 +335,12 @@ def _sources(task: dag.Task, claims: Sequence[Mapping[str, Any]], repo_path: Any
     — the question that had no answer when a ticket was edited between the approval and the build.
     """
     found: dict[str, Any] = {}
+    # A bundle's launch is sent to every member's ticket (`build_prompts`), so it records them all.
+    tickets = [
+        (f"ticket:{m}" if task.members else "ticket", f"docs/tasks/{m}.md") for m in (task.members or (task.id,))
+    ]
     for name, rel in (
-        ("ticket", f"docs/tasks/{task.id}.md"),
+        *tickets,
         ("design", "docs/20-design.md"),
         ("baseline", "docs/05-current-state.md"),
     ):

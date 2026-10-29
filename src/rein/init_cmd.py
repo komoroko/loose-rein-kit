@@ -18,7 +18,8 @@ detection. Existing files are never overwritten (idempotent re-runs).
 Usage:
   uvx --from git+<rein repo> rein init --name myproduct   # first contact
   rein init --name myproduct [--branch build/myproduct] [--source <url>]
-  rein init                  # interactive wizard on a TTY (name, brief, agent surface, sandbox)
+  rein init --name myproduct --language ja   # the documents the agents write, in Japanese
+  rein init                  # interactive wizard on a TTY (name, brief, language, agent surface, sandbox)
 
 The source URL (for `rein upgrade`) is auto-detected from this install's PEP 610 metadata
 when --source is omitted; the work branch defaults to build/<name>, and the headless agent CLI
@@ -39,7 +40,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import rein
-from rein import common, cycle, reviews_cmd, upstream
+from rein import common, cycle, models, reviews_cmd, upstream
 from rein import data as data_mod
 from rein import install as install_mod
 from rein import lock as lock_mod
@@ -89,10 +90,18 @@ def fill_state(text: str, project: str, cycle_id: str, today: str) -> str:
     return re.sub(r"^(updated_at: ).*$", rf'\g<1>"{today}"', text, count=1, flags=re.MULTILINE)
 
 
-def fill_config(text: str, project: str, branch: str) -> str:
+def fill_config(text: str, project: str, branch: str, language: str = models.DEFAULT_LANGUAGE) -> str:
     """Fill config.yaml's project block."""
     text = re.sub(r"^(  name: )\S+", rf"\g<1>{project}", text, count=1, flags=re.MULTILINE)
+    text = re.sub(r"^(  language: )\S+", rf"\g<1>{language}", text, count=1, flags=re.MULTILINE)
     return re.sub(r"^(  work_branch: )\S+", rf"\g<1>{branch}", text, count=1, flags=re.MULTILINE)
+
+
+def language_problem(language: str) -> str:
+    """Why `language` cannot be `project.language`, or "" when it can."""
+    if models.LANGUAGE_RE.match(language):
+        return ""
+    return f"{language!r} is not a language tag — write one like en, ja or pt-BR"
 
 
 def disable_template_mode(text: str) -> str:
@@ -405,8 +414,12 @@ def run_init(
     mode: str = "auto",
     offer_sandbox: bool = False,
     offer_surface: bool = False,
+    language: str = models.DEFAULT_LANGUAGE,
 ) -> int:
     """Seed the repo (SSOT + docs scaffolds + materialized artifacts + pointer block + lock)."""
+    if problem := language_problem(language):
+        logger.error(f"init: {problem}. Nothing was written.")
+        return 2
     today = datetime.date.today().isoformat()
     root = root.resolve()
     brownfield = is_brownfield(root) if mode == "auto" else (mode == "brownfield")
@@ -433,7 +446,7 @@ def run_init(
     cycle_id = _cycle_slug(name)
     state_text = fill_state(data_mod.read_text("scaffold/rein/state.yaml"), name, cycle_id, today)
     plan_text = cycle.fill_plan(data_mod.read_text("scaffold/rein/plan.yaml"), cycle_id, branch)
-    config_text = fill_config(data_mod.read_text("scaffold/rein/config.yaml"), name, branch)
+    config_text = fill_config(data_mod.read_text("scaffold/rein/config.yaml"), name, branch, language)
     if brownfield:
         config_text = brownfield_config(config_text, test_cmd, check_cmd)
     else:
@@ -520,6 +533,16 @@ def _ask(prompt: str, default: str = "") -> str:
     return input(shown).strip() or default
 
 
+def _ask_language() -> str:
+    """The language deliverables are written in, asked until the answer is a tag. Enter is `en`."""
+    while True:
+        language = _ask("language the documents are written in (a tag: en, ja, …)", models.DEFAULT_LANGUAGE)
+        problem = language_problem(language)
+        if not problem:
+            return language
+        print(f"  {problem}")
+
+
 def _ask_brief() -> str:
     print("What do you want to build? (1-3 lines for docs/00-product-brief.md;")
     lines: list[str] = []
@@ -534,12 +557,15 @@ def _ask_brief() -> str:
 def wizard(root: Path | None = None) -> int:
     """Interactive first-run setup, in two halves.
 
-    **Nothing is written until both questions below are answered**, so Ctrl+C during either loses
-    nothing. What `run_init` asks *after* that — the agent surface, the sandboxes — are add-ons to a
-    repository that is already initialized: they cannot be asked earlier, because both questions are
-    about the config that was just written, and interrupting one skips that step rather than
-    aborting anything. There is no question count in the prompts for the same reason: whether the
-    later two are asked at all depends on what the seeded config turns out to say.
+    **Nothing is written until the three questions below are answered**, so Ctrl+C during any of
+    them loses nothing. The third is the language the documents are written in, asked here rather
+    than left to each agent to infer from the conversation — a guess that made one repository's
+    deliverables change language with whoever was typing. What `run_init` asks *after* that — the
+    agent surface, the sandboxes — are add-ons to a repository that is already initialized: they
+    cannot be asked earlier, because both questions are about the config that was just written, and
+    interrupting one skips that step rather than aborting anything. There is no question count in
+    the prompts for the same reason: whether the later two are asked at all depends on what the
+    seeded config turns out to say.
     """
     common.configure_logging()
     root = (root or Path.cwd()).resolve()
@@ -547,12 +573,13 @@ def wizard(root: Path | None = None) -> int:
     try:
         name = _ask("product name", root.name)
         summary = _ask_brief()
+        language = _ask_language()
     except (KeyboardInterrupt, EOFError):
         logger.error("\naborted — nothing was written.")
         return 130
     # branch defaults to build/<name>; source is auto-detected in run_init; the headless CLI keeps
     # its scaffold default (claude -p) — all three are overridable later (flags / `rein agent`).
-    rc = run_init(root, name, f"build/{name}", "", offer_sandbox=True, offer_surface=True)
+    rc = run_init(root, name, f"build/{name}", "", offer_sandbox=True, offer_surface=True, language=language)
     if rc != 0:
         return rc
     if summary:
@@ -577,6 +604,11 @@ def main(argv: list[str] | None = None) -> int:
     flavor = parser.add_mutually_exclusive_group()
     flavor.add_argument("--greenfield", action="store_true", help="skip the brownfield auto-detection")
     flavor.add_argument("--brownfield", action="store_true", help="force the brownfield adaptations")
+    parser.add_argument(
+        "--language",
+        default=models.DEFAULT_LANGUAGE,
+        help="the language docs/** and the plan's prose are written in, as a tag (default: en)",
+    )
     parser.add_argument("--repo", default=None, help="directory to initialize (default: cwd)")
     args = parser.parse_args(argv)
     common.configure_logging()
@@ -598,4 +630,5 @@ def main(argv: list[str] | None = None) -> int:
         test_cmd=args.test_cmd.strip(),
         check_cmd=args.check_cmd.strip(),
         mode=mode,
+        language=args.language.strip(),
     )

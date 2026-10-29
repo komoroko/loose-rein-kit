@@ -428,7 +428,7 @@ def _edit_task(tmp_path: Path, edit: Callable[[dict[str, Any]], None]) -> None:
     path = tmp_path / ".rein" / "plan.yaml"
     raw = store_mod.Store(repo_mod.Repo(tmp_path)).read_raw("plan")
     assert raw is not None
-    edit(raw["tasks"][0])
+    edit(raw["issues"][0]["sub_issues"][0])
     path.write_bytes(store_mod.dump_yaml(raw))
 
 

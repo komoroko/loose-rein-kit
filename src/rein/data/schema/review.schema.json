@@ -1541,6 +1541,28 @@
                     }
                   }
                 },
+                "split_from_bundles": {
+                  "description": "Sub-issues a bundle that did not land was split back into, each with why (`state.yaml` `unbundled`). Grouping is the loop's and needs no approval; listed here so that is not the same as unseen.",
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "task_id",
+                      "why"
+                    ],
+                    "properties": {
+                      "task_id": {
+                        "$ref": "#/$defs/taskId"
+                      },
+                      "why": {
+                        "type": "string",
+                        "maxLength": 500
+                      }
+                    }
+                  }
+                },
                 "deferred": {
                   "description": "Tasks taken out of the plan while it was a draft (`rein task defer`): each with the status it had and why. What this change does not deliver, on the screen that takes it.",
                   "type": "array",

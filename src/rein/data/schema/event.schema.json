@@ -54,6 +54,8 @@
         "task_started",
         "task_failed",
         "task_completed",
+        "bundle_landed",
+        "bundle_split",
         "run_aborted",
         "run_measured",
         "environment_repinned",

@@ -1,10 +1,10 @@
 # T-NNN: <task title>
 
 - **Covers requirement/design**: R-x / the relevant section of 20-design.md   <!-- the claim_ids of this task in .rein/plan.yaml. e.g. C-001 -->
-- **Kind**: parallel          <!-- foundation | parallel | integration. foundation=a base many depend on / parallel=independent leaves that run concurrently / integration=a join of several -->
+- **Issue**: I-NNN           <!-- the issue this sub-issue belongs to in .rein/plan.yaml. Its `kind` and its edges to other issues live there; the loop may implement several sub-issues of one issue in one launch -->
 - **Phase**: build   <!-- requirements | design | build | verify. Default build. A bug fix originating from /verify is verify. Context for the human; the plan carries the DAG. -->
 - **status**: todo            <!-- todo | in-progress | blocked | needs-revision | awaiting-evidence | done. The truth is in .rein/state.yaml -->
-- **blockedBy**: none   <!-- tasks that must be done first. e.g. T-001, T-002 -->
+- **blockedBy**: none   <!-- sub-issues of the same issue that must be done first. e.g. T-001, T-002. An edge to another issue is the issue's -->
 - **Dependents (what waits on this task)**: none  <!-- e.g. T-005, T-006. The more there are, the more parallelism is freed by finishing it early -->
 - **Owner**: implementer
 

@@ -11,10 +11,11 @@ frozen environment that has to change. That is `--to mandate`, and it re-opens `
 `--to acceptance` withdraws a change that was already taken. `--to T-NNN` withdraws the approval of
 one irreversible crossing; what the task already did stays done.
 
-**Also for re-cutting the task DAG** — splitting, merging or re-scoping tasks. It reads like a
-decomposition detail and is not one: `tasks[].acceptance` is in `plan.yaml` with the claims, so a
-new breakdown can carry a softened criterion, and the freeze covers the whole document. What needs
-no roll back is the *order*: a missing dependency edge — one task has to wait for another the plan
+**Also for re-cutting the sub-issues** — splitting, merging or re-scoping them. It reads like a
+decomposition detail and is not one: each sub-issue's `acceptance` is in `plan.yaml` with the
+claims, so a new breakdown can carry a softened criterion, and the freeze covers the whole document.
+What needs no roll back is how the loop groups an issue's sub-issues into launches — it does that
+itself, and no grouping moves a criterion — and the *order*: a missing dependency edge — one task has to wait for another the plan
 did not say it waits for — is `rein task order <T-NNN> --after <T-MMM> --reason "…"`. It is written
 beside the frozen plan, not into it, so the plan's digest and every approval bound to it stand; the
 chain records it and acceptance lists it. A re-approval after a real roll back shows the approver

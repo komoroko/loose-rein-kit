@@ -647,12 +647,22 @@ def completed_commits(state: models.State | None) -> dict[str, str]:
     return out
 
 
-def _tasks_block(graph: dag.Graph, state: models.State | None = None) -> dict[str, object]:
-    """The task-graph slice of the status object — every value derived, nothing stored."""
+def _tasks_block(
+    graph: dag.Graph, state: models.State | None = None, plan: models.Plan | None = None
+) -> dict[str, object]:
+    """The task-graph slice of the status object — every value derived, nothing stored.
+
+    Two levels: `rows` are the sub-issues the loop schedules, `issues` the issues they belong to,
+    with their own layers and critical path — the graph a person reads first, and opens.
+    """
     fan = graph.fan_out()
     counts = graph.counts()
     handoffs = _handoffs(state)
     commits = completed_commits(state)
+    issues = dag.issue_graph(plan, graph) if plan is not None else dag.Graph.from_tasks([])
+    members: dict[str, list[str]] = {}
+    for t in graph.tasks:
+        members.setdefault(t.issue_id, []).append(t.id)
     return {
         "counts": {s: counts[s] for s in dag.STATUS_ORDER},
         "total": len(graph.tasks),
@@ -674,9 +684,28 @@ def _tasks_block(graph: dag.Graph, state: models.State | None = None) -> dict[st
                 "fan_out": fan[t.id],
                 "handoff": handoffs.get(t.id, {}),
                 "commit": commits.get(t.id, ""),
+                "issue": t.issue_id,
+                "irreversible": t.irreversible,
+                "unbundled": t.unbundled,
+                "acceptance": [
+                    {"id": str(a.get("id", "")), "statement": str(a.get("statement", ""))} for a in t.acceptance
+                ],
             }
             for t in graph.tasks
         ],
+        "issues": [
+            {
+                "id": i.id,
+                "title": i.title,
+                "kind": i.kind,
+                "status": i.status,
+                "blocked_by": list(i.blocked_by),
+                "sub_issues": members.get(i.id, []),
+            }
+            for i in issues.tasks
+        ],
+        "issue_layers": issues.layers(),
+        "issue_critical_path": issues.critical_path(),
     }
 
 
@@ -1063,7 +1092,7 @@ def collect_status(
     if plan is not None:
         try:
             graph = dag.join(plan, state)
-            tasks_block = _tasks_block(graph, state)
+            tasks_block = _tasks_block(graph, state, plan)
             counts = graph.counts()
             trace_block = _trace_block(dag_trace.trace_repo(repo, plan, graph))
         except dag.DagError as exc:

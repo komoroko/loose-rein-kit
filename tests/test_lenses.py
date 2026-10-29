@@ -319,7 +319,7 @@ def test_re_selecting_before_the_freeze_resolves_against_the_plan_as_it_now_is(
 ) -> None:
     """`/req` runs with no tasks in the plan yet and `/tasks` runs with all of them. The last write
     before the mandate is the one that gets frozen, so both see the same facts."""
-    from tests._support import make_task
+    from tests._support import as_issues, make_task
 
     repo = _repo(tmp_path, tasks=[])
     lens_cmd.main(["--select", "requirements", "--repo", str(tmp_path)])
@@ -329,7 +329,7 @@ def test_re_selecting_before_the_freeze_resolves_against_the_plan_as_it_now_is(
 
     plan = _plan(store_mod, repo)
     raw = json.loads(json.dumps(dict(plan.raw)))
-    raw["tasks"] = [make_task("T-001", claim_ids=["C-001"], scope_include=["src/x.schema.json"])]
+    raw["issues"] = as_issues([make_task("T-001", claim_ids=["C-001"], scope_include=["src/x.schema.json"])])
     _write_plan(store_mod, repo, raw)
     lens_cmd.main(["--select", "code", "--repo", str(tmp_path)])
 

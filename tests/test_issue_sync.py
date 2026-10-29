@@ -17,6 +17,7 @@ def _task(
     status: str = "todo",
     claim_ids: tuple[str, ...] = ("C-001",),
     risk: str = "low",
+    issue: str = "I-001",
 ) -> dag.Task:
     return dag.Task(
         id=tid,
@@ -26,6 +27,21 @@ def _task(
         status=status,
         claim_ids=claim_ids,
         risk=risk,
+        issue_id=issue,
+    )
+
+
+def _issue(iid: str = "I-001", subs: tuple[str, ...] = ("T-001", "T-002")) -> models.Issue:
+    return models.Issue(
+        {"id": iid, "title": f"{iid} title", "kind": "parallel", "sub_issues": [{"id": t} for t in subs]}
+    )
+
+
+def _existing(
+    element_id: str, desired: issue_sync.DesiredIssue, number: int, parent: int | None = None
+) -> issue_sync.ExistingIssue:
+    return issue_sync.ExistingIssue(
+        number=number, title=desired.title, state="OPEN", labels=desired.labels, body=desired.body, parent=parent
     )
 
 
@@ -173,8 +189,9 @@ def test_dry_run_is_offline_and_plans_creates(project: Path, capsys: pytest.Capt
     rc = issue_sync.main(["--dry-run"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "create T-001" in out
-    assert "create T-002" in out
+    # Each issue first, then each sub-issue under it.
+    assert out.index("create   I-001") < out.index("create   T-001 :: T-001: task T-001  (under I-001)")
+    assert "create   T-002 :: T-002: task T-002  (under I-002)" in out
     # Labels to create/ensure (fixed kind/status/phase + dynamic req).
     assert "kind:foundation" in out
     assert "risk:low" in out
@@ -237,3 +254,76 @@ def test_apply_one_creates_then_closes_done_task(monkeypatch: pytest.MonkeyPatch
     assert calls[0][:3] == ["gh", "issue", "create"]
     assert "--repo" in calls[0] and "owner/repo" in calls[0]
     assert ["gh", "issue", "close", "42", "--repo", "owner/repo"] in calls
+
+
+# --- issues and their sub-issues (CR-85) -------------------------------------
+
+
+def test_an_issue_is_created_before_the_sub_issues_that_go_under_it() -> None:
+    tasks = (_task("T-002"), _task("T-001"))
+    actions = issue_sync.plan_actions(tasks, {}, base_label="rein", close_on_done=True, issues=(_issue(),))
+    assert [(a.op, a.task_id, a.parent) for a in actions] == [
+        ("create", "I-001", ""),
+        ("create", "T-001", "I-001"),
+        ("create", "T-002", "I-001"),
+    ]
+    assert "<!-- rein:I-001 -->" in actions[0].desired.body
+    assert issue_sync.task_id_of("renamed", actions[0].desired.body) == "I-001"
+
+
+def test_an_issue_closes_only_once_every_sub_issue_is_done() -> None:
+    half = (_task("T-001", status="done"), _task("T-002"))
+    assert issue_sync.desired_parent(_issue(), half, base_label="rein", close_on_done=True).closed is False
+    whole = (_task("T-001", status="done"), _task("T-002", status="done"))
+    parent = issue_sync.desired_parent(_issue(), whole, base_label="rein", close_on_done=True)
+    assert parent.closed is True and "status:done" in parent.labels
+    assert dag.rollup_status(["done", "blocked"]) == "blocked"
+
+
+def test_a_sub_issue_under_the_wrong_issue_is_moved_and_one_in_place_is_left_alone() -> None:
+    issue, task = _issue(subs=("T-001",)), _task("T-001")
+    parent = issue_sync.desired_parent(issue, (task,), base_label="rein", close_on_done=True)
+    child = issue_sync.desired_issue(task, base_label="rein", close_on_done=True)
+    in_place = {"I-001": _existing("I-001", parent, 10), "T-001": _existing("T-001", child, 11, parent=10)}
+    assert issue_sync.plan_actions((task,), in_place, base_label="rein", close_on_done=True, issues=(issue,)) == []
+    elsewhere = {**in_place, "T-001": _existing("T-001", child, 11, parent=99)}
+    actions = issue_sync.plan_actions((task,), elsewhere, base_label="rein", close_on_done=True, issues=(issue,))
+    assert [(a.op, a.number, a.parent) for a in actions] == [("reparent", 11, "I-001")]
+
+
+def test_apply_puts_a_created_sub_issue_under_the_number_its_issue_was_just_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = issue_sync.GithubConfig(enabled=True, label="rein", close_on_done=True, repo="owner/repo")
+    calls: list[list[str]] = []
+    numbers = iter(("41", "42"))
+
+    def fake_run(args: list[str], cwd: str | None = None) -> tuple[int, str]:
+        calls.append(args)
+        return 0, f"https://github.com/owner/repo/issues/{next(numbers)}\n"
+
+    monkeypatch.setattr(issue_sync, "_run", fake_run)
+    actions = issue_sync.plan_actions(
+        (_task("T-001"),), {}, base_label="rein", close_on_done=True, issues=(_issue(subs=("T-001",)),)
+    )
+    known: dict[str, int] = {}
+    for action in actions:
+        issue_sync._apply_one(action, cfg, known)
+    assert known == {"I-001": 41, "T-001": 42}
+    assert calls[1][calls[1].index("--parent") + 1] == "41"
+
+
+def test_a_gh_without_parent_is_refused_rather_than_mirroring_the_work_flat(
+    project: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(issue_sync, "preflight", lambda cfg: (True, ""))
+    calls: list[list[str]] = []
+
+    def old_gh(args: list[str], cwd: str | None = None) -> tuple[int, str]:
+        calls.append(args)
+        return 0, "Usage: gh issue create [flags]\n  --title string\n"
+
+    monkeypatch.setattr(issue_sync, "_run", old_gh)
+    assert issue_sync.main([]) == 1
+    assert "gh 2.103 or later" in capsys.readouterr().err
+    assert all("create" not in a or "--help" in a for a in calls), "nothing may be created by a gh that cannot nest"

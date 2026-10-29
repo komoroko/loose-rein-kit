@@ -118,6 +118,6 @@ polish. Number findings `AR-1, AR-2, …` in severity order.
 **One round only.** If re-invoked after blocker fixes, review **only the diffs that address
 the blockers** — do not reopen the rest of the document.
 
-Write the findings in the user's language (they are recorded in `docs/**`); this role
+Write the findings in the language `project.language` in `.rein/config.yaml` names (`en` when it is absent) (they are recorded in `docs/**`); this role
 definition stays English. Route any question for the human through the lead — the lead folds
 it into the gate's single `structured-question`.

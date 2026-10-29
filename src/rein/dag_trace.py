@@ -89,6 +89,8 @@ class TraceReport:
     requirements: list[str] = field(default_factory=list)
     claims_by_requirement: dict[str, list[str]] = field(default_factory=dict)
     tasks_by_claim: dict[str, list[str]] = field(default_factory=dict)
+    #: The issue each sub-issue belongs to, so the thread reads requirement → claim → issue → sub-issue.
+    issue_of: dict[str, str] = field(default_factory=dict)
 
     requirements_without_claims: list[str] = field(default_factory=list)
     claims_without_tasks: list[str] = field(default_factory=list)
@@ -156,6 +158,7 @@ def trace(
     dimensions when those documents are available.
     """
     report = TraceReport(checked_design=design_text is not None, checked_test_plan=test_plan_text is not None)
+    report.issue_of = {task.id: task.issue_id for task in plan.tasks}
     tasks = graph.tasks if graph is not None else ()
     task_claims: dict[str, list[str]] = {}
     for task in tasks:
@@ -208,7 +211,7 @@ def trace_repo(
 
 def render_trace(report: TraceReport) -> str:
     """The thread as a human-facing report."""
-    lines = ["### Traceability thread (requirement → claim → task)", ""]
+    lines = ["### Traceability thread (requirement → claim → issue / sub-issue)", ""]
     if not report.checked:
         lines.append(
             f"**unknown** — neither {REQUIREMENTS_DOC} nor the plan names a requirement id, so there "
@@ -217,12 +220,13 @@ def render_trace(report: TraceReport) -> str:
         )
         return "\n".join(lines)
 
-    lines.append("| Requirement | Claims | Tasks |")
-    lines.append("|-------------|--------|-------|")
+    lines.append("| Requirement | Claims | Issue / sub-issue |")
+    lines.append("|-------------|--------|-------------------|")
     for rid in report.requirements:
         claims = report.claims_by_requirement.get(rid, [])
         tasks = sorted({t for cid in claims for t in report.tasks_by_claim.get(cid, [])})
-        lines.append(f"| {rid} | {', '.join(claims) or '-'} | {', '.join(tasks) or '-'} |")
+        named = [f"{report.issue_of[t]}/{t}" if report.issue_of.get(t) else t for t in tasks]
+        lines.append(f"| {rid} | {', '.join(claims) or '-'} | {', '.join(named) or '-'} |")
     lines.append("")
 
     errors, warnings = report.errors, report.warnings

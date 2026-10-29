@@ -18,7 +18,7 @@ import pytest
 from rein import build_loop, common, events, models
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import agent_envelope, make_config, make_plan, make_state, make_task, seed_repo
+from tests._support import agent_envelope, make_config, make_plan, make_state, make_task, plan_tasks, seed_repo
 
 WORK_BRANCH = "build/demo"
 GATE = [{"name": "test", "command": ["true"], "executor_profile": "quality", "retries": 0}]
@@ -176,7 +176,7 @@ def _errors(plan: dict[str, Any]) -> list[str]:
 
 def test_a_fallback_may_only_replace_what_rests_on_its_premise() -> None:
     plan = _plan(["true"], fallback=True)
-    plan["tasks"][1]["acceptance"][0]["assumes"] = []
+    plan_tasks(plan)[1]["acceptance"][0]["assumes"] = []
     assert any("does not assume P-3" in e for e in _errors(plan))
 
 

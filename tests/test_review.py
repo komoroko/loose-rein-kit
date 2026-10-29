@@ -48,7 +48,16 @@ from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
-from tests._support import agent_envelope, make_config, make_plan, make_reviews, make_state, make_task, seed_repo
+from tests._support import (
+    agent_envelope,
+    make_config,
+    make_plan,
+    make_reviews,
+    make_state,
+    make_task,
+    plan_tasks,
+    seed_repo,
+)
 
 #: Every reading, as a review taken under the packaged `reviews.yaml` with the security reading
 #: switched on.
@@ -197,7 +206,7 @@ def test_what_the_change_requires_of_a_person_survives_the_schema_validated_writ
     (review_repo / "db" / "schema.sql").write_text("create table users (id int);\n", encoding="utf-8")
     plan_path = review_repo / ".rein" / "plan.yaml"
     plan = yaml.safe_load(plan_path.read_text(encoding="utf-8"))
-    plan["tasks"][0]["operator_surface"] = [
+    plan_tasks(plan)[0]["operator_surface"] = [
         {"kind": "persistence", "name": "users", "paths": ["db/schema.sql"], "reversible": True, "adr": "ADR-001"}
     ]
     plan_path.write_text(yaml.safe_dump(plan, sort_keys=False), encoding="utf-8")

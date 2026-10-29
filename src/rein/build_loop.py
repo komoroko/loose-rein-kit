@@ -855,6 +855,40 @@ def record_salvage(repo: repo_mod.Repo, task_id: str, *, branch: str, salvage_st
     )
 
 
+def record_bundle_split(repo: repo_mod.Repo, members: Sequence[str], *, why: str, kept: str) -> None:
+    """Send every sub-issue a failed bundle carried back to `todo`, to run alone, in one transaction.
+
+    Not a verdict about any of them: the launch failed, and which of its sub-issues it failed for is
+    what no reader of a shared tree can say. So none of them is `blocked`, none spends a send-back
+    budget, and the lead's handoff — the bundle's own record, retries and salvage included — goes.
+    A fresh launch at the lead alone would otherwise inherit its siblings' failure as its own.
+    """
+
+    def once() -> None:
+        store = store_mod.Store(repo)
+        state = store.read_state()
+        if state is None:
+            raise StopLoop("no .rein/state.yaml to record a bundle split in")
+        seen = store_mod.read_digest(state)
+        raw = json.loads(json.dumps(state.raw))
+        tasks = raw.setdefault("tasks", {})
+        for task_id in members:
+            entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
+            kept_fields = {
+                k: v for k, v in entry.items() if k not in ("handoff", "evidence", "completed_commit", "note")
+            }
+            tasks[task_id] = {**kept_fields, "status": "todo", "unbundled": why[:2000] or "the bundle did not land"}
+        raw["updated_at"] = event_chain.now_iso()
+        detail: dict[str, Any] = {"why": why[-_HANDOFF_SUMMARY_MAX:]}
+        if kept:
+            detail["kept"] = kept
+        with store.transaction() as tx:
+            tx.write("state", raw, expect_digest=seen)
+            tx.append("bundle_split", cycle_id=state.cycle_id, subject_ids=list(members), detail=detail)
+
+    store_mod.retry_on_stale(once)
+
+
 def agent_launch_note(*, role: str, adapter: str, rc: int, output: str, session: str = "") -> dict[str, Any]:
     """What the last agent launch actually said, shaped for `handoff.last_agent`.
 
@@ -4155,7 +4189,11 @@ class Orchestrator:
             # straight to acceptance, and a full gate run at the root to answer a question no task is
             # going to ask is exactly the waste this exists to end.
             self._load_baseline()
+            tasks = self._bundled(runnable, tasks)
             print(f"[batch] mode={mode} tasks={[t.id for t in tasks]}")
+            for task in tasks:
+                if task.members:
+                    print(f"  [bundle] {task.id} carries {', '.join(task.members)} in one launch")
             self._consume_batch(tasks)
             # Recompute at the top of the loop after each batch (reassemble the chain).
 
@@ -4536,6 +4574,59 @@ class Orchestrator:
             return False
         return task_id in state.crossing_gates and state.gate_status(task_id) != "approved"
 
+    @staticmethod
+    def _carried(task: dag.Task) -> tuple[str, ...]:
+        """The sub-issues one launch carries: a bundle's members, or the task itself."""
+        return task.members or (task.id,)
+
+    def _bundled(self, graph: dag.Graph, tasks: Sequence[dag.Task]) -> list[dag.Task]:
+        """The batch as launches: each task with the siblings :func:`dag.bundle` puts in its launch.
+
+        A sibling a bundle already took leaves the batch, so no sub-issue is launched twice.
+        """
+        launches: list[dag.Task] = []
+        taken: set[str] = set()
+        for task in tasks:
+            if task.id in taken:
+                continue
+            launch = dag.bundle(graph, graph.get(task.id))
+            launches.append(launch)
+            taken.update(self._carried(launch))
+        return launches
+
+    def _split_bundle(self, task: dag.Task, why: str) -> None:
+        """A bundle that did not land: each of its sub-issues goes back to run alone (CR-83)."""
+        self._cleanup_worktree(task)
+        kept = self.ws.set_aside(task.id)
+        if self.dry_run:
+            for member in task.members:
+                self._sim_status[member] = "todo"
+        else:
+            record_bundle_split(self.repo, task.members, why=why, kept=kept)
+        where = f"; what it wrote is kept on {kept}" if kept else ""
+        print(f"  [bundle] {', '.join(task.members)}: did not land together — each runs alone next{where}")
+
+    def _record_landed(self, task: dag.Task, commit: str) -> None:
+        """Record a landed launch: every sub-issue it carried, each against its own criteria.
+
+        A bundle's members share the commit and the gate steps, and each keeps only the criteria
+        that are its own (`dag.of_member`). Whether one is `done` or waiting for evidence is asked
+        of that member alone, so one member's external criterion parks it and not its siblings.
+        """
+        if not task.members:
+            self._set_status(task.id, self._completion_status(task), commit=commit)
+            return
+        record = self._evidence.get(task.id, {})
+        with self._evidence_lock:
+            for member in task.members:
+                own = {k: v for k, v in record.items() if k != "acceptance"}
+                if accepted := dag.of_member(record.get("acceptance") or [], member):
+                    own["acceptance"] = accepted
+                self._evidence[member] = own
+        for member in task.members:
+            self._set_status(member, self._completion_status(self._graph_task(member) or task), commit=commit)
+        self._event("bundle_landed", list(task.members), {"commit": commit} if commit else {})
+
     def _consume_batch(self, tasks: list[dag.Task]) -> None:
         """Implement a batch worktree-isolated up to max_parallel, then merge in ascending id order.
 
@@ -4559,7 +4650,8 @@ class Orchestrator:
         because a *different* leaf hit a session limit would be its own kind of dishonesty.
         """
         for task in tasks:
-            self._set_status(task.id, "in-progress", new_attempt=True)
+            for member in self._carried(task):
+                self._set_status(member, "in-progress", new_attempt=True)
         # Worktree creation is serial (avoid git lock contention). The implementation is run in parallel after.
         branches = {
             task.id: self.ws.add_worktree(task.id, str(self._handoff_for(task).get("salvage_branch", "")))
@@ -4587,8 +4679,13 @@ class Orchestrator:
             ok, log = outcome.ok, outcome.log
             if outcome.fault is not None:
                 # No verdict: no status, no escalation, and the worktree stays where it is.
-                self._set_status(task.id, "todo")
+                for member in self._carried(task):
+                    self._set_status(member, "todo")
                 print(f"  [aborted] {task.id}: the machine stopped this leaf — left todo, work preserved")
+                continue
+            if task.members and (outcome.violations or not ok):
+                # A bundle's failure is no verdict about any one sub-issue it carried (CR-83).
+                self._split_bundle(task, log or "it changed a path the gate guard refuses")
                 continue
             if outcome.violations:
                 self._block_for_gate_violation(
@@ -4613,7 +4710,8 @@ class Orchestrator:
             # forgot to commit would otherwise lose that work when the worktree is removed.
             if not self.ws.finalize_commit(self.ws.worktree_path(task.id), f"{task.id}: {task.title}"):
                 # Keep the worktree (it may hold the only copy) and let the rest of the batch merge.
-                self._set_status(task.id, "blocked")
+                for member in self._carried(task):
+                    self._set_status(member, "blocked")
                 blocked_any = True
                 continue
             # The leaf's commits were made in its worktree, where --no-verify (finalize) or a
@@ -4621,6 +4719,9 @@ class Orchestrator:
             # HEAD where --check-diff never looks again. Check the branch's full diff first.
             if not self.dry_run:
                 violations = self._gate_violations(self.ws.branch_changed_paths(task.id))
+                if violations and task.members:
+                    self._split_bundle(task, f"its branch changes paths the gate guard refuses: {violations}")
+                    continue
                 if violations:
                     self._block_for_gate_violation(task.id, f"leaf branch {branches[task.id]}", violations)
                     self._cleanup_worktree(task)  # not merged; the branch keeps the diff for review
@@ -4629,6 +4730,8 @@ class Orchestrator:
             if self.merge_leaf(task, branches[task.id]):
                 merged.append(task)  # done is decided after the integration gate below
                 landed[task.id] = self._landed(task.id)  # this leaf's merge commit, before the next one
+            elif task.members:
+                self._split_bundle(task, f"its branch {branches[task.id]} did not merge into {self.branch}")
             else:
                 self._set_status(task.id, "blocked")
                 self._cleanup_worktree(task)  # conflict: aborted merge, worktree no longer needed
@@ -4687,7 +4790,7 @@ class Orchestrator:
         # asking it here would name the last merge for every member of the batch.
         recorded = [t for t in merged if t.id in {j.id for j in [*joined, *elsewhere]}]
         for task in recorded:
-            self._set_status(task.id, self._completion_status(task), commit=landed.get(task.id, ""))
+            self._record_landed(task, landed.get(task.id, ""))
         # Then the readings, which can raise — a repair that reaches outside its scope stops the
         # run. Interleaved with the pass above, that would leave the leaves after it unrecorded.
         for task in recorded:
@@ -4695,7 +4798,7 @@ class Orchestrator:
             # then can a repair made on top of it be charged to it (`_repair_warm_findings`).
             at_tip = bool(landed.get(task.id)) and landed[task.id] == self._landed(task.id)
             if self._repair_warm_findings(task, self._warm_reading(task), at_tip=at_tip):
-                self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
+                self._record_landed(task, self._landed(task.id))
         if recorded:
             self._warn_on_review_outlook()
         if blocked_any:
@@ -4747,7 +4850,8 @@ class Orchestrator:
                         "escalation": {"kind": "join_stuck", "message": message[-_HANDOFF_SUMMARY_MAX:]},
                     },
                 )
-                self._set_status(task.id, "blocked")
+                for member in self._carried(task):
+                    self._set_status(member, "blocked")
             self._escalate_batch("join_stuck", f"{message}\n{log}" if log else message, joined)
             return False
         where = f" (kept on {kept})" if kept else ""
@@ -4766,7 +4870,11 @@ class Orchestrator:
                     },
                 )
         for task in joined:
-            self._set_status(task.id, status)
+            if task.members and status == "blocked":
+                self._split_bundle(task, log or "the join it was in did not pass the integration gate")
+                continue
+            for member in self._carried(task):
+                self._set_status(member, status)
         if log:
             self._escalate_batch("integration_red", f"{message}\n{log}", joined)
         else:
@@ -5005,7 +5113,7 @@ class Orchestrator:
         except (pr_stack.StackError, dag.DagError, models.DocumentError, store_mod.StoreError) as exc:
             print(f"    [{where}] no stack to place this on ({exc}) — the work branch it is")
             return ""
-        found = next((s for s in slices if s.task_id == task_id), None)
+        found = next((s for s in slices if task_id in s.delivers), None)
         if found is None or found.branch == self.branch:
             return ""
         return found.branch if review_reading.commit_exists(self.repo, found.branch) else ""

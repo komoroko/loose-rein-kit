@@ -117,6 +117,15 @@ class Task:
     #: A budget raised after the mandate (`rein task attempts`) replaces the plan's.
     attempt_max: int = 0
     attempt_cost: str = ""
+    #: The issue this sub-issue belongs to. A launch never carries work from two issues.
+    issue_id: str = ""
+    #: Whether this sub-issue declares an `operator_surface` it cannot undo — a crossing of its own.
+    irreversible: bool = False
+    #: Why a bundle holding this sub-issue was split (`state.yaml` `unbundled`): it now runs alone.
+    unbundled: str = ""
+    #: The sub-issues one launch carries, lead first, when this task is a bundle (:func:`bundle`).
+    #: Empty for a launch that carries this sub-issue alone.
+    members: tuple[str, ...] = ()
 
     @property
     def is_done(self) -> bool:
@@ -312,6 +321,7 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
     scope_added = state.task_scope_added if state is not None else {}
     # A budget raised at the crossing (`rein task attempts`) replaces the frozen one the same way.
     attempts_max = state.task_attempts_max if state is not None else {}
+    unbundled = state.task_unbundled if state is not None else {}
     # A premise observed false with a fallback swaps the criteria resting on it for the ones a
     # human approved with the mandate. The plan document is untouched — it is frozen, and its
     # fallback is part of what was frozen — so this is where the swap becomes the task's bar.
@@ -369,10 +379,159 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
                 operate=t.operate,
                 attempt_max=attempts_max.get(t.id, t.attempt_max),
                 attempt_cost=t.attempt_cost,
+                issue_id=t.issue_id,
+                irreversible=bool(t.irreversible_surfaces),
+                unbundled=unbundled.get(t.id, ""),
             )
             for t in plan.tasks
         ]
     )
+
+
+def rollup_status(statuses: Sequence[str]) -> str:
+    """One status for an issue, read off its sub-issues'.
+
+    `done` when every one is, `todo` while none has started, and otherwise the one a person most
+    needs to see: something stuck outranks something running.
+    """
+    found = set(statuses)
+    if found == {"done"}:
+        return "done"
+    if found <= {"todo"}:
+        return "todo"
+    for worst in ("blocked", "needs-revision", "awaiting-evidence"):
+        if worst in found:
+            return worst
+    return "in-progress"
+
+
+def issue_graph(plan: models.Plan, graph: Graph) -> Graph:
+    """The issues as a graph of their own: their edges, their DAG role, and a status rolled up.
+
+    What the dashboard draws. The loop schedules sub-issues, never this.
+    """
+    statuses: dict[str, list[str]] = {}
+    for task in graph.tasks:
+        statuses.setdefault(task.issue_id, []).append(task.status)
+    return Graph.from_tasks(
+        [
+            Task(
+                id=issue.id,
+                title=issue.title,
+                kind=issue.kind,
+                blocked_by=issue.blocked_by,
+                status=rollup_status(statuses.get(issue.id, [])),
+            )
+            for issue in plan.issues
+        ]
+    )
+
+
+#: Separates a member's id from its criterion's in a bundle's acceptance: `T-002/A-1`. Criterion
+#: ids are scoped to their sub-issue, so two members can both have an `A-1`.
+MEMBER_SEP = "/"
+
+
+def bundleable(task: Task) -> str:
+    """Why `task` has to be launched alone, or "" when it may share a launch with its siblings.
+
+    Each reason is a thing a shared launch would get wrong. A crossing's budget prices the runs a
+    human approved for that crossing, so a sibling's failure must not spend it. `operate` and
+    `requires` are steps and preconditions of one sub-issue's launch. A person's deliverable is
+    never launched at all. And a sub-issue a bundle already failed with runs alone, so that what
+    decides it is a launch of its own.
+    """
+    if task.produced_by != "agent":
+        return "a person produces it"
+    if task.irreversible or task.attempt_max:
+        return "it crosses an irreversible point"
+    if task.operate:
+        return "the loop operates it"
+    if task.requires:
+        return "it has preconditions of its own"
+    if task.unbundled:
+        return "a bundle holding it was split"
+    return ""
+
+
+def bundle(graph: Graph, lead: Task) -> Task:
+    """`lead` and the sub-issues of its issue that follow it, as one launch — or `lead` alone.
+
+    Deterministic from the graph: the plan's order, the statuses, and the split marks. Members are
+    taken in plan order after `lead` while each is `todo`, may share a launch, runs in `lead`'s
+    environment, and waits for nothing outside the bundle that is not done. The first sub-issue
+    that fails any of those ends the bundle, so a bundle is always a contiguous run of its issue.
+    Done siblings are passed over: they are not work, and they do not break the run.
+
+    The bundle is a :class:`Task` under `lead`'s id whose `members` names everything it carries.
+    Its scope covers what any member's does, its criteria are every member's, named
+    ``<member>/<criterion>`` so two members' `A-1` stay apart, and its claims are all of theirs.
+    """
+    if bundleable(lead):
+        return lead
+    siblings = [t for t in graph.tasks if t.issue_id == lead.issue_id]
+    members = [lead]
+    ids = {lead.id}
+    for task in siblings[siblings.index(lead) + 1 :]:
+        if task.is_done:
+            continue
+        if (
+            task.status != "todo"
+            or bundleable(task)
+            or (task.env, task.allow) != (lead.env, lead.allow)
+            or not all(dep in ids or graph.get(dep).is_done for dep in task.blocked_by)
+        ):
+            break
+        members.append(task)
+        ids.add(task.id)
+    if len(members) == 1:
+        return lead
+    return merged(members)
+
+
+def merged(members: Sequence[Task]) -> Task:
+    """One launch carrying `members` (lead first), under the lead's id."""
+    from dataclasses import replace
+
+    lead = members[0]
+    ids = [m.id for m in members]
+
+    def union(values: Sequence[tuple[str, ...]]) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(v for value in values for v in value))
+
+    # A member with no `include` is unbounded, and so is anything carrying it. An `exclude` stays
+    # only where no member's own scope reaches: one member's "not here" is not a sibling's.
+    include = () if any(not m.scope_include for m in members) else union([m.scope_include for m in members])
+    exclude = tuple(
+        path
+        for path in union([m.scope_exclude for m in members])
+        if all(common.outside_scope([path], m.scope_include, m.scope_exclude) for m in members)
+    )
+    return replace(
+        lead,
+        title=f"{lead.issue_id}: {', '.join(ids)}",
+        blocked_by=tuple(dep for dep in union([m.blocked_by for m in members]) if dep not in ids),
+        risk=models.max_risk([m.risk for m in members]),
+        claim_ids=union([m.claim_ids for m in members]),
+        domains=union([m.domains for m in members]),
+        scope_include=include,
+        scope_exclude=exclude,
+        acceptance=tuple(
+            {**entry, "id": f"{m.id}{MEMBER_SEP}{entry.get('id', '?')}"} for m in members for entry in m.acceptance
+        ),
+        assumes=union([m.assumes for m in members]),
+        members=tuple(ids),
+    )
+
+
+def of_member(entries: Sequence[Mapping[str, Any]], member: str) -> list[dict[str, Any]]:
+    """`member`'s entries out of a bundle's criteria (or their records), under their own ids again."""
+    prefix = f"{member}{MEMBER_SEP}"
+    return [
+        {**entry, "id": str(entry["id"])[len(prefix) :]}
+        for entry in entries
+        if str(entry.get("id", "")).startswith(prefix)
+    ]
 
 
 def _assumed(acceptance: tuple[Mapping[str, Any], ...]) -> tuple[str, ...]:

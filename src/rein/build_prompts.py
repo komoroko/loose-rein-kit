@@ -116,11 +116,21 @@ def implementer_prompt(
         if continued_from
         else ""
     )
+    # A bundle is one launch carrying several sub-issues of one issue: every one of them is the
+    # task, each with its own ticket and its own criteria, and none of them is finished until all are.
+    tickets = ", ".join(f"docs/tasks/{member}.md" for member in (task.members or (task.id,)))
+    subject = (
+        f"Your task is the sub-issues {', '.join(task.members)} of {task.issue_id}, in this one launch — "
+        "implement all of them, in that order; one change covers them all, and each is judged by its own "
+        "criteria.\n"
+        if task.members
+        else f'Your only task is {task.id} "{task.title}".\n'
+    )
     prompt = (
-        f'You are the implementer subagent. Your only task is {task.id} "{task.title}".\n'
+        f"You are the implementer subagent. {subject}"
         f"{continuation}"
         f"{dossier_ref}"
-        f"Then read docs/tasks/{task.id}.md, {design_ref}, and the existing code, and implement "
+        f"Then read {tickets}, {design_ref}, and the existing code, and implement "
         f"following the protocol in .rein/prompts/agents/implementer.md.{baseline_ref}\n"
         f"{task_test_ref}"
         f"Write automated tests and get {_gate_list(gate_cmds)} green.\n"

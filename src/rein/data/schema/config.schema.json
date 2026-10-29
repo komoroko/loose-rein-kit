@@ -36,6 +36,11 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 200
+        },
+        "language": {
+          "description": "The language the documents the agents write are in: `docs/**` and the plan's prose (titles, claims, criteria). A BCP 47 tag (`en`, `ja`, `pt-BR`); `en` when absent. Chosen at `rein init`. Conversation stays in whatever language the person uses, and what the code itself prints — the CLI, the dashboard, pull-request bodies, Decision Cards — stays English.",
+          "type": "string",
+          "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$"
         }
       }
     },

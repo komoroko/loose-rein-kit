@@ -479,6 +479,11 @@ def _residuals(state: models.State | None, reviews_applied: Mapping[str, Sequenc
     raised = [{"task_id": tid, "max": count} for tid, count in sorted(state.task_attempts_max.items())]
     if raised:
         residual["attempts_raised_after_mandate"] = raised[:MAX_TASKS]
+    # How the loop grouped the work changed after the mandate: a bundle that did not land was split,
+    # and its sub-issues ran alone. No approval covers grouping, and this is where it is seen.
+    split = [{"task_id": tid, "why": why[:500]} for tid, why in sorted(state.task_unbundled.items())]
+    if split:
+        residual["split_from_bundles"] = split[:MAX_TASKS]
     # Work taken out of the plan while it was a draft (`rein task defer`). What the change does not
     # deliver belongs on the screen that takes it, not only in the chain.
     deferred = [

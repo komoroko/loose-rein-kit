@@ -405,10 +405,20 @@ def test_status_payload_carries_every_field_the_modules_read(tmp_path: Path) -> 
     tasks = payload["tasks"]
     assert isinstance(tasks, dict)
     # Board.jsx: Dag/Layers/pills; Now.jsx: InTheWay
-    for key in ("rows", "counts", "total", "layers", "critical_path", "frontier"):
+    for key in ("rows", "counts", "total", "layers", "critical_path", "frontier", "issues", "issue_layers"):
+        assert key in tasks, f"status.tasks.{key}"
+    for key in ("issue_critical_path",):
         assert key in tasks, f"status.tasks.{key}"
     for key in ("id", "title", "kind", "status", "risk", "blocked_by", "claim_ids", "handoff", "commit"):
         assert key in tasks["rows"][0], f"status.tasks.rows[].{key}"
+    # Board.jsx: IssueDetail opens an issue, and lists its sub-issues from the rows
+    for key in ("issue", "irreversible", "unbundled", "acceptance"):
+        assert key in tasks["rows"][0], f"status.tasks.rows[].{key}"
+    for key in ("id", "title", "kind", "status", "blocked_by", "sub_issues"):
+        assert key in tasks["issues"][0], f"status.tasks.issues[].{key}"
+    assert tasks["issues"][0]["sub_issues"] == [
+        r["id"] for r in tasks["rows"] if r["issue"] == tasks["issues"][0]["id"]
+    ]
     # the pills and the layer bar index counts by the status vocabulary itself
     assert set(tasks["counts"]) == set(models.TASK_STATUS_ORDER)
 

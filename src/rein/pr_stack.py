@@ -102,6 +102,14 @@ class Slice:
     #: The head the pull request was opened against. Differs from `head_sha` once a review fix has
     #: been committed onto the branch — which is the whole point of committing it there.
     opened_at: str = ""
+    #: Every sub-issue this slice delivers when one launch carried several (`bundle_landed`), lead
+    #: first. Empty when it delivers `task_id` alone.
+    members: tuple[str, ...] = ()
+
+    @property
+    def delivers(self) -> tuple[str, ...]:
+        """The sub-issues this slice delivers, in order."""
+        return self.members or ((self.task_id,) if self.task_id else ())
 
     @property
     def label(self) -> str:
@@ -311,6 +319,28 @@ def _landing_order_problems(graph: dag.Graph, landed: Sequence[str]) -> list[str
     return problems
 
 
+def bundles(events: Iterable[models.Event]) -> dict[str, tuple[str, ...]]:
+    """Landed commit → the sub-issues one launch carried into it, from the `bundle_landed` events.
+
+    The latest record for a commit wins: a repair moves a bundle's landing, and records it again.
+    """
+    found: dict[str, tuple[str, ...]] = {}
+    for event in events:
+        if event.event == "bundle_landed" and (commit := str(event.detail.get("commit", ""))):
+            found[commit] = tuple(event.subject_ids)
+    return found
+
+
+def _title(plan: models.Plan, task_id: str, members: Sequence[str]) -> str:
+    """A slice's title: its task's, or for a bundle its issue's and every member's."""
+    task = plan.task(task_id)
+    if not members:
+        return task.title if task is not None else task_id
+    issue = plan.issue(task.issue_id) if task is not None else None
+    titles = "; ".join(t.title for m in members if (t := plan.task(m)) is not None)
+    return f"{issue.title if issue is not None else task_id} ({', '.join(members)}: {titles})"
+
+
 def derive(repo: repo_mod.Repo, docs: Documents, *, base: str = "main") -> list[Slice]:
     """The stack: one slice per task that landed, plus a tail for whatever landed outside a task.
 
@@ -334,11 +364,23 @@ def derive(repo: repo_mod.Repo, docs: Documents, *, base: str = "main") -> list[
 
     graph = dag.join(plan, state)
     commit_of = status_api.completed_commits(state)
+    carried = bundles(events)
     done = {t.id for t in graph.tasks if t.is_done}
     landed_commits: dict[str, str] = {}
+
+    def members_of(task_id: str) -> tuple[str, ...]:
+        members = carried.get(commit_of.get(task_id, ""), ())
+        return members if task_id in members else ()
+
     for landed_task in sorted(done):
         commit = commit_of.get(landed_task)
         if not commit:
+            continue
+        members = members_of(landed_task)
+        if members:
+            # One launch carried these into one commit, and the chain says so: one slice, under
+            # the bundle's lead, delivering all of them.
+            landed_commits[commit] = members[0]
             continue
         if commit in landed_commits:
             # Keyed by commit, a second task with the same one silently replaced the first and that
@@ -364,12 +406,13 @@ def derive(repo: repo_mod.Repo, docs: Documents, *, base: str = "main") -> list[
                 f"slice {record.index:02d} has an open pull request on {record.branch}, but that branch is "
                 "not in this repository — fetch it, or the stack cannot be read"
             )
-        task = plan.task(record.task_id) if record.task_id else None
         slices.append(
             Slice(
                 index=record.index,
                 task_id=record.task_id,
-                title=task.title if task is not None else "(commits outside any task)",
+                title=_title(plan, record.task_id, members_of(record.task_id))
+                if record.task_id
+                else "(commits outside any task)",
                 branch=record.branch,
                 base_ref=previous_branch,
                 base_sha=previous_sha,
@@ -377,6 +420,7 @@ def derive(repo: repo_mod.Repo, docs: Documents, *, base: str = "main") -> list[
                 commits=_commits_between(repo, previous_sha, head),
                 opened=True,
                 opened_at=record.head,
+                members=members_of(record.task_id) if record.task_id else (),
             )
         )
         previous_branch, previous_sha = record.branch, head
@@ -409,17 +453,17 @@ def derive(repo: repo_mod.Repo, docs: Documents, *, base: str = "main") -> list[
         task_id = landed_commits.get(commit)
         if task_id is None:
             continue
-        task = plan.task(task_id)
         slices.append(
             Slice(
                 index=index,
                 task_id=task_id,
-                title=task.title if task is not None else task_id,
+                title=_title(plan, task_id, members_of(task_id)),
                 branch=branch_name(work_branch, plan.cycle_id, index, task_id),
                 base_ref=previous_branch,
                 base_sha=previous_sha,
                 head_sha=commit,
                 commits=_commits_between(repo, previous_sha, commit),
+                members=members_of(task_id),
             )
         )
         previous_branch, previous_sha = slices[-1].branch, commit
@@ -635,17 +679,18 @@ def _claim_lines(docs: Documents, slice_: Slice, *, approved: bool) -> list[str]
     `verified`: integrity, semantic support and conformance are decided apart, and rendering them
     as one verdict is the precise misreading acceptance exists to prevent.
     """
-    task = docs.plan.task(slice_.task_id) if slice_.task_id else None
-    if task is None:
+    tasks = [t for m in slice_.delivers if (t := docs.plan.task(m)) is not None]
+    if not tasks:
         return ["- (no task — these commits belong to none, so there is no claim to answer)"]
-    if not task.claim_ids:
+    claim_ids = list(dict.fromkeys(c for t in tasks for c in t.claim_ids))
+    if not claim_ids:
         return ["- (this task answers no claim)"]
     verdicts = {
         str(r.get("claim_id")): r
         for r in (docs.review.claim_results if docs.review is not None and docs.review.is_generated else ())
     }
     lines: list[str] = []
-    for claim_id in task.claim_ids:
+    for claim_id in claim_ids:
         claim = docs.plan.claim(claim_id)
         statement = claim.statement if claim is not None else "(no such claim in the plan)"
         lines.append(f"- **{claim_id}** — {statement}")
@@ -663,18 +708,30 @@ def _claim_lines(docs: Documents, slice_: Slice, *, approved: bool) -> list[str]
 
 
 def _acceptance_lines(docs: Documents, slice_: Slice) -> list[str]:
-    """This task's own bar, and for the criteria the loop cannot establish, whether anybody saw it."""
-    task = docs.plan.task(slice_.task_id) if slice_.task_id else None
-    if task is None or not task.acceptance:
+    """Each delivered sub-issue's own bar, and for what the loop cannot establish, whether anybody saw it.
+
+    A bundle's slice names each criterion with its sub-issue, because two members can both have an
+    `A-1` and a reader has to know whose bar it is.
+    """
+    tasks = [t for m in slice_.delivers if (t := docs.plan.task(m)) is not None]
+    if not any(t.acceptance for t in tasks):
         return ["- (none declared — the criterion is the acceptance review itself)"]
-    recorded = {str(item.get("id")): item for item in docs.state.recorded_acceptance(slice_.task_id)}
+    lines: list[str] = []
+    for task in tasks:
+        lines += _criteria_lines(docs, task, named=bool(slice_.members))
+    return lines
+
+
+def _criteria_lines(docs: Documents, task: models.Task, *, named: bool) -> list[str]:
+    recorded = {str(item.get("id")): item for item in docs.state.recorded_acceptance(task.id)}
     lines: list[str] = []
     for criterion in task.acceptance:
         ac_id = str(criterion.get("id", "?"))
         spec = criterion.get("evidence")
         kind = str(spec.get("kind", "")) if isinstance(spec, dict) else ""
         how = f"`{kind}`" if kind else "prose only — left to the acceptance review"
-        lines.append(f"- **{ac_id}** — {criterion.get('statement', '')} · {how}")
+        shown = f"{task.id} {ac_id}" if named else ac_id
+        lines.append(f"- **{shown}** — {criterion.get('statement', '')} · {how}")
         if kind != "external":
             continue
         observation = recorded.get(ac_id)

@@ -296,6 +296,16 @@ export function OrientStage({ data, review, asBuilt, onAsBuilt }) {
       </tr>
     );
   }
+  // A bundle that did not land, split back into sub-issues that ran alone. Grouping is the loop's
+  // and needs nobody's approval; this is where that stops meaning nobody saw it.
+  for (const o of residuals.split_from_bundles || []) {
+    residualRows.push(
+      <tr key={"split:" + o.task_id}>
+        <td>split from a bundle</td>
+        <td className="mono">{o.task_id}: {o.why}</td>
+      </tr>
+    );
+  }
   // Which reviews read each task. `reviews.yaml` can change mid-cycle without rewinding anything,
   // so the screen that takes the change says what each task actually got.
   for (const r of residuals.reviews_by_task || []) {

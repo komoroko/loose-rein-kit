@@ -24,7 +24,7 @@ import pytest
 from rein import build_loop, common, digests, dossier, evidence, strict_yaml
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import agent_envelope, make_config, make_plan, make_state, make_task, seed_repo
+from tests._support import agent_envelope, make_config, make_plan, make_state, make_task, plan_tasks, seed_repo
 
 WORK_BRANCH = "build/demo"
 
@@ -61,7 +61,7 @@ def scope_the_plan(repo: repo_mod.Repo, task_id: str, *, include: list[str]) -> 
     """Give one plan task a declared scope, editing the document rather than its text."""
     path = repo.path(".rein/plan.yaml")
     plan = strict_yaml.load_mapping(path.read_text(encoding="utf-8"), what="plan.yaml")
-    for entry in plan["tasks"]:
+    for entry in plan_tasks(plan):
         if entry["id"] == task_id:
             entry["scope"] = {"include": include}
     path.write_text(store_mod.dump_yaml(plan).decode("utf-8"), encoding="utf-8")
