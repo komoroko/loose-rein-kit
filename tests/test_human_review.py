@@ -425,3 +425,36 @@ def test_an_empty_residue_says_so_rather_than_saying_nothing() -> None:
     residue = human_review.residue(review)
     assert not any(residue.values())
     assert "nothing" in human_review.render_residue(residue)
+
+
+def _ld(ident: str) -> dict[str, Any]:
+    return {
+        "id": ident,
+        "task": "T-001",
+        "statement": "retry 3 times",
+        "rationale": "r",
+        "undo": "T-001: a.py",
+        "anchor": "a.py:1",
+    }
+
+
+def test_a_decision_nobody_was_asked_about_is_residue_until_it_is_overruled() -> None:
+    """Approving keeps a decision an implementer made without asking, so the gate names each one.
+    Overruled, it leaves the residue and holds the gate shut until `rein build` repaired it."""
+    machine = {"local_decisions": [_ld("LD-0000000a"), _ld("LD-0000000b")], "reviews": {"read": [], "findings": []}}
+    standing = _review(machine=machine)
+    assert [item.split(" ")[0] for item in human_review.residue(standing)["decided_alone"]] == [
+        "LD-0000000a",
+        "LD-0000000b",
+    ]
+    assert not any("overruled" in b for b in human_review.completion_blockers(standing))
+
+    overruled = _review(
+        machine=machine,
+        human={
+            "status": "in_progress",
+            "dispositions": [{"subject_id": "LD-0000000a", "action": "revise_implementation"}],
+        },
+    )
+    assert [item.split(" ")[0] for item in human_review.residue(overruled)["decided_alone"]] == ["LD-0000000b"]
+    assert any("LD-0000000a" in b and "rein build" in b for b in human_review.completion_blockers(overruled))

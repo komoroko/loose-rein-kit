@@ -99,6 +99,7 @@ from rein import (
     status_api,
     strict_yaml,
 )
+from rein import events as events_mod
 from rein import (
     findings as findings_mod,
 )
@@ -124,6 +125,8 @@ _REPAIR_REFUSED = frozenset({"untested", "test_only", "inert"})
 #: What the integration reviewer's findings file is named after. Not a task id — the subject is the
 #: join of a batch — and `dossier.findings_path` only needs a stable name to write beside.
 _INTEGRATION_SUBJECT = "integration"
+#: The key a confirmation of the join's findings is answered under: the merged tree is one subject.
+_JOIN = "join"
 #: The statuses a task's work is on the work branch in: what a reading waits for all of its tasks to reach.
 _LANDED_STATUSES = frozenset({"done", "awaiting-evidence"})
 #: The findings file a reviewer writes, at the repository root, is named after what it reads
@@ -1015,6 +1018,8 @@ class ReviewAnswer:
 
     #: `must_fix` findings (or a tree that moved under the reader) for its implementer.
     send_back: str = ""
+    #: The findings `send_back` renders, as data: what the next reading confirms rather than re-reads.
+    outstanding: tuple[Mapping[str, Any], ...] = ()
     #: Why the task cannot land on this reading: no entry for it, or an answer nobody can read.
     stop: str = ""
     #: The reader never ran: no verdict about the task at all.
@@ -1477,6 +1482,7 @@ class Orchestrator:
             diff_cmd=diff_cmd,
             history=self._history_for(task),
             handoff=self._handoff_for(task),
+            upstream_decisions=self._upstream_decisions(task),
             env={
                 "role": role,
                 "task_id": task.id,
@@ -1488,6 +1494,19 @@ class Orchestrator:
         written = dossier.write(cwd, document)
         self._spend_handover(role, dossier.handover_bytes(document, written, self.repo.path))
         return f"{dossier.RELATIVE_PATH}/{task.id}.json"
+
+    def _upstream_decisions(self, task: dag.Task) -> list[dict[str, str]]:
+        """The local decisions recorded by every task this one stands on, transitively.
+
+        A bundle stands on what its members stand on and not on its own members, which run in this
+        same launch.
+        """
+        if not self.cycle_id:
+            return []
+        upstream = self._load_graph().dependencies_closure(task.blocked_by) - {task.id, *task.members}
+        if not upstream:
+            return []
+        return [d for d in events_mod.local_decisions(self.store.read_events(), self.cycle_id) if d["task"] in upstream]
 
     def _agent_sandbox(self) -> models.ExecutorProfile | None:
         """The profile an agent CLI is launched in, or None to launch it on the host.
@@ -1978,20 +1997,36 @@ class Orchestrator:
                 and step.matches_paths(self.ws.branch_changed_paths(task.id) if not self.dry_run else [])
             ]
             rounds = max(0, step.retries)
+            # What each sent-back leaf was sent, and the head the reading that raised it saw. A leaf
+            # holding findings is confirmed against them; one with none (its tree moved under the
+            # reader) has not been read over the tree it is landing, and is read whole.
+            prior: dict[str, tuple[Mapping[str, Any], ...]] = {}
+            seen: dict[str, str] = {}
             for attempt in range(rounds + 1):
                 if not subjects:
                     break
                 if self.dry_run:
                     print(f"    [dry-run] review {', '.join(t.id for t in subjects)} in one launch ({step.name})")
                     break
+                to_confirm = [t for t in subjects if prior.get(t.id)]
+                to_read = [t for t in subjects if not prior.get(t.id)]
+                heads = {t.id: self.ws.head(cwd=self.ws.worktree_path(t.id)) for t in subjects}
+                answers: dict[str, ReviewAnswer] = {}
+                if to_read:
+                    answers.update(self._read_batch(step, to_read))
+                if to_confirm:
+                    answers.update(self._confirm_batch(step, to_confirm, prior, seen))
+                seen.update(heads)
                 send_back: dict[str, str] = {}
-                for task_id, answer in self._read_batch(step, subjects).items():
+                prior = {}
+                for task_id, answer in answers.items():
                     if answer.fault is not None:
                         results[task_id] = LeafOutcome(ok=False, log=answer.fault.summary(), fault=answer.fault)
                     elif answer.stop:
                         results[task_id] = LeafOutcome(ok=False, log=answer.stop)
                     elif answer.send_back:
                         send_back[task_id] = answer.send_back
+                        prior[task_id] = answer.outstanding
                 if not send_back:
                     break
                 if attempt == rounds:
@@ -2088,8 +2123,121 @@ class Orchestrator:
                     f"    [review] {task_id}: {len(findings)} finding(s), none blocking:\n"
                     + dossier.render_findings(findings)
                 )
-            answers[task_id] = ReviewAnswer(send_back=text)
+            answers[task_id] = ReviewAnswer(send_back=text, outstanding=tuple(outstanding))
         return answers
+
+    def _confirm_batch(
+        self,
+        step: GateStep,
+        subjects: Sequence[dag.Task],
+        prior: Mapping[str, Sequence[Mapping[str, Any]]],
+        seen: Mapping[str, str],
+    ) -> dict[str, ReviewAnswer]:
+        """One launch that judges, for each sent-back leaf, whether its fix closed what it was sent.
+
+        The discovering reading was `_read_batch`'s; this one only confirms (`confirm_prompt`). A
+        finding still open, or breakage inside the fix, goes back within the same rounds. What the
+        reader saw beyond the fix goes to the chain and on to acceptance, and spends nothing here.
+        """
+        ids = [task.id for task in subjects]
+        argv = step.agent_argv or self.config.adapter_argv
+        target = dossier.findings_path(self.root, _BATCH_REVIEW_SUBJECT.format(ids="+".join(ids)))
+        target.unlink(missing_ok=True)
+        findings_file = str(target.absolute())
+        state = self.store.read_state()
+        prompt = build_prompts.confirm_prompt(
+            [
+                build_prompts.ConfirmSubject(
+                    key=task.id,
+                    findings=prior[task.id],
+                    fix_diff_cmd=f"git diff {seen[task.id]}..{self.ws.branch_for(task.id)}",
+                    report=str((read_task_handoff(state, task.id).get("report") or {}).get("summary", "")),
+                )
+                for task in subjects
+            ],
+            findings_path=findings_file,
+        )
+        before = {task.id: self._fingerprint(self.ws.worktree_path(task.id)) for task in subjects}
+        try:
+            self._launch(
+                adapters.command(argv, prompt, access=adapters.REVIEW, writable=findings_file),
+                cwd=self.root,
+                where=f"{', '.join(ids)}: confirming the '{step.name}' findings",
+                role=step.agent_role or "reviewer",
+            )
+        except EnvironmentFault as fault:
+            return {task_id: ReviewAnswer(fault=fault) for task_id in ids}
+        try:
+            confirmed, missing = dossier.parse_confirmation(
+                target.read_text(encoding="utf-8"), {task_id: prior[task_id] for task_id in ids}
+            )
+        except FileNotFoundError:
+            unreadable = f"the confirming reader wrote no answer ({findings_file})."
+            return {task_id: ReviewAnswer(stop=f"{task_id}: {unreadable}") for task_id in ids}
+        except (dossier.FindingsError, OSError) as exc:
+            unreadable = f"the confirming reader's answer could not be read — {exc}"
+            return {task_id: ReviewAnswer(stop=f"{task_id}: {unreadable}") for task_id in ids}
+        answers = {
+            task_id: ReviewAnswer(
+                stop=f"{task_id}: the confirming reader wrote no entry for this task, so it does not land."
+            )
+            for task_id in missing
+        }
+        for task_id, answer in confirmed.items():
+            # A confirmation is a reading the task got, and how much it saw beyond the fix is counted
+            # per reading, a zero included: that count is what says whether confirming narrowed it.
+            self._event(
+                "reviews_applied",
+                [task_id],
+                {"step": step.name, "stage": "task", "reviews": [], "confirm": True, "outside": len(answer.outside)},
+            )
+            self._add_review_findings(task_id, answer.new)
+            self._record_outside([task_id], step.name, answer, prior[task_id])
+            outstanding = [*answer.open, *dossier.must_fix(answer.new)]
+            moved = before[task_id] != self._fingerprint(self.ws.worktree_path(task_id)) or not before[task_id]
+            text = dossier.render_findings(outstanding) if outstanding else ""
+            if moved:
+                moved_line = (
+                    "  - the tree changed while it was being reviewed; the gate has to be established over it again"
+                )
+                text = f"{text}\n{moved_line}" if text else moved_line
+            answers[task_id] = ReviewAnswer(send_back=text, outstanding=tuple(outstanding))
+        return answers
+
+    def _record_outside(
+        self,
+        subjects: Sequence[str],
+        step: str,
+        answer: dossier.Confirmation,
+        confirming: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Put what a confirming reader saw beyond the fix into the chain, for acceptance to repair.
+
+        Not this fix's question, so it does not go back to the implementer and spends none of its
+        rounds — but it is not dropped either: the next review carries every one nobody has
+        repaired (`review.machine.observations`), and acceptance routes it like a finding.
+        """
+        if not answer.outside or self.dry_run or not self.cycle_id:
+            return
+        print(
+            f"    [review] {', '.join(subjects)}: {len(answer.outside)} observation(s) outside the fix "
+            "→ carried to acceptance"
+        )
+        with self.store.transaction() as tx:
+            for observation in answer.outside:
+                tx.append(
+                    "finding_observed",
+                    cycle_id=self.cycle_id,
+                    actor="rein build",
+                    subject_ids=list(subjects),
+                    detail={
+                        "step": step,
+                        **{k: observation[k] for k in ("severity", "statement", "anchor")},
+                        # The findings whose fix was being confirmed: what the reader was looking at
+                        # when it saw this (devr 論点 S: an observation names what prompted it).
+                        "confirming": [f"{f.get('anchor') or '(no anchor)'}: {f.get('statement')}" for f in confirming],
+                    },
+                )
 
     def _graph_task(self, task_id: str) -> dag.Task | None:
         if not task_id or self._plan is None:
@@ -3563,30 +3711,50 @@ class Orchestrator:
         ids = ",".join(t.id for t in tasks)
         target = dossier.findings_path(self.root, _INTEGRATION_SUBJECT)
         rounds = max(0, step.retries)
+        # After the first reading, a round confirms what the fixer was sent rather than reading the
+        # join whole again (`confirm_prompt`): `outstanding` is what it was sent, `seen` the head the
+        # reading that raised it saw.
+        outstanding: list[Mapping[str, Any]] = []
+        seen = ""
+        # The non-blocking findings of every round. A confirming round reads only the fix, so what
+        # the first reading said beside its must-fix findings is said once and has to be kept.
+        advisory: list[Mapping[str, Any]] = []
         for attempt in range(rounds + 1):
             target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
             findings_file = str(target.absolute())  # absolute for the same reason as `_read_batch`'s (#116)
+            head = self.ws.head()
+            if outstanding:
+                prompt = build_prompts.confirm_prompt(
+                    [
+                        build_prompts.ConfirmSubject(
+                            key=_JOIN, findings=outstanding, fix_diff_cmd=f"git diff {seen}..HEAD"
+                        )
+                    ],
+                    findings_path=findings_file,
+                )
+                where = f"{ids}: confirming the '{step.name}' findings over the merged tree"
+            else:
+                prompt = build_prompts.integration_review_prompt(
+                    ids,
+                    gate_cmds=self.config.gate_cmds,
+                    diff_cmd=f"git diff {before_join}..HEAD",
+                    findings_path=findings_file,
+                    reviews=step.reviews,
+                    questions=self.config.questions,
+                    disciplines=adapters.disciplines_for(step.agent_argv or self.config.adapter_argv),
+                    lenses_applied=self._code_lenses[0],
+                    lenses_proposed=self._code_lenses[1],
+                )
+                where = f"{ids}: the '{step.name}' agent step over the merged tree"
             self._launch(
                 adapters.command(
-                    step.agent_argv or self.config.adapter_argv,
-                    build_prompts.integration_review_prompt(
-                        ids,
-                        gate_cmds=self.config.gate_cmds,
-                        diff_cmd=f"git diff {before_join}..HEAD",
-                        findings_path=findings_file,
-                        reviews=step.reviews,
-                        questions=self.config.questions,
-                        disciplines=adapters.disciplines_for(step.agent_argv or self.config.adapter_argv),
-                        lenses_applied=self._code_lenses[0],
-                        lenses_proposed=self._code_lenses[1],
-                    ),
-                    access=adapters.REVIEW,
-                    writable=findings_file,
+                    step.agent_argv or self.config.adapter_argv, prompt, access=adapters.REVIEW, writable=findings_file
                 ),
                 cwd=self.root,
-                where=f"{ids}: the '{step.name}' agent step over the merged tree",
+                where=where,
                 role=step.agent_role or "reviewer",
             )
+            seen = head
             if not target.exists():
                 raise StopLoop(
                     f"{ids}: the integration reviewer wrote no findings file "
@@ -3594,22 +3762,32 @@ class Orchestrator:
                     "readable is not a review that found nothing."
                 )
             try:
-                findings = dossier.parse_findings(target.read_text(encoding="utf-8"))
+                raw = target.read_text(encoding="utf-8")
+                if outstanding:
+                    confirmed, _ = dossier.parse_confirmation(raw, {_JOIN: outstanding})
+                    if _JOIN not in confirmed:
+                        raise dossier.FindingsError(f"no entry for `{_JOIN}`")
+                    answer = confirmed[_JOIN]
+                    self._record_outside([t.id for t in tasks], step.name, answer, outstanding)
+                    findings = [*answer.open, *answer.new]
+                    reading: dict[str, Any] = {"reviews": [], "confirm": True, "outside": len(answer.outside)}
+                else:
+                    findings = dossier.parse_findings(raw)
+                    reading = {"reviews": list(step.reviews)}
             except (dossier.FindingsError, OSError) as exc:
                 raise StopLoop(f"{ids}: the integration reviewer's findings could not be read — {exc}") from None
             self._event(
-                "reviews_applied",
-                [t.id for t in tasks],
-                {"step": step.name, "stage": "integration", "reviews": list(step.reviews)},
+                "reviews_applied", [t.id for t in tasks], {"step": step.name, "stage": "integration", **reading}
             )
             outstanding = dossier.must_fix(findings)
+            advisory.extend(f for f in findings if f.get("severity") != "must_fix")
             if not outstanding:
-                if findings:
+                if advisory:
                     print(
-                        f"    [review] {ids}: {len(findings)} finding(s) about the join, none blocking:\n"
-                        + dossier.render_findings(findings)
+                        f"    [review] {ids}: {len(advisory)} finding(s) about the join, none blocking:\n"
+                        + dossier.render_findings(advisory)
                     )
-                self._file_integration_findings(findings, tasks)
+                self._file_integration_findings(advisory, tasks)
                 return
             if attempt == rounds:
                 raise StopLoop(
@@ -5094,6 +5272,65 @@ class Orchestrator:
             landed = self._repair_on_work_branch(task, item, where=where)
         if landed:
             self._restate_evidence(task.id, self._gate_after_repair(task, where=where))
+            self._record_overruled(item)
+            self._record_observations_repaired(item)
+
+    def _record_observations_repaired(self, item: repair_mod.Repair) -> None:
+        """Close each observation this landed repair answered, so the next review stops carrying it."""
+        repaired = [a.finding_id for a in item.items if a.kind == "observation"]
+        if not repaired or self.dry_run or not self.cycle_id:
+            return
+        with self.store.transaction() as tx:
+            for observation_id in repaired:
+                tx.append(
+                    "observation_repaired",
+                    cycle_id=self.cycle_id,
+                    actor="rein build",
+                    subject_ids=[observation_id],
+                    detail={"repaired_by": item.task_id},
+                )
+
+    def _record_overruled(self, item: repair_mod.Repair) -> None:
+        """Put each overruled decision this landed repair answered into the chain, as a person's.
+
+        Only once a repair landed: the review's human half is where the overruling was answered,
+        and a repair that was refused leaves it there, so the next round tries again and a person
+        still sees it at the gate. Written here, the decision leaves the next review's list and
+        `rein decisions` reads it as the human's. It is also the `too_local` arm of
+        `reach_overruled`: a decision the loop took to be its own, which the person who would pay
+        disagreed with.
+        """
+        decided = [a for a in item.items if a.kind == "local_decision"]
+        if not decided or self.dry_run or not self.cycle_id:
+            return
+        review = self.store.read_review()
+        notes = {
+            str(d.get("subject_id")): str(d.get("note", ""))
+            for d in ((review.human.get("dispositions") if review is not None else None) or [])
+            if isinstance(d, Mapping)
+        }
+        authors = {d["id"]: d["task"] for d in events_mod.local_decisions(self.store.read_events(), self.cycle_id)}
+        with self.store.transaction() as tx:
+            for attribution in decided:
+                author = authors.get(attribution.finding_id, "")
+                tx.append(
+                    "decision_overruled",
+                    cycle_id=self.cycle_id,
+                    actor="rein build",
+                    subject_ids=[attribution.finding_id, *([author] if author else [])],
+                    detail={
+                        "repaired_by": item.task_id,
+                        **({"note": notes[attribution.finding_id]} if notes.get(attribution.finding_id) else {}),
+                    },
+                )
+        for attribution in decided:
+            observations.record(
+                "reach_overruled",
+                project=self.repo.root.name,
+                cycle_id=self.cycle_id,
+                subject=attribution.finding_id,
+                arm=observations.ARM_TOO_LOCAL,
+            )
 
     def _slice_branch(self, task_id: str, *, where: str = "acceptance") -> str:
         """The stack branch that introduced this task's code, or "" when this is not a stack.

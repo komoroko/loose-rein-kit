@@ -1594,6 +1594,41 @@
             }
           }
         },
+        "observations": {
+          "description": "What a reader confirming a fix during the build saw beyond the fix, read from the audit chain when the review was generated (`finding_observed`), minus those a repair has closed (`observation_repaired`). It went back to no implementer and spent no round there; acceptance routes each like a review finding, to the task whose scope owns its anchor.",
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "seen_in", "severity", "statement", "anchor"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^OB-[0-9a-f]{8}$"},
+              "seen_in": {"type": "string", "maxLength": 512},
+              "severity": {"enum": ["must_fix", "question"]},
+              "statement": {"type": "string", "maxLength": 2000},
+              "anchor": {"type": "string", "maxLength": 512}
+            }
+          }
+        },
+        "local_decisions": {
+          "description": "What implementers decided without asking during this cycle and nobody has overruled, read from the audit chain when the review was generated (`rein decision add`). Not a question: approving keeps every one. A human may overrule any of them (a `revise_implementation` disposition on its id), which the next `rein build` records in the chain and repairs.",
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "task", "statement", "rationale", "undo", "anchor"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^LD-[0-9a-f]{8}$"},
+              "task": {"$ref": "#/$defs/taskId"},
+              "statement": {"type": "string", "maxLength": 2000},
+              "rationale": {"type": "string", "maxLength": 2000},
+              "undo": {"type": "string", "maxLength": 2000},
+              "anchor": {"type": "string", "maxLength": 512}
+            }
+          }
+        },
         "residual_findings": {
           "description": "Per-task review findings that were never resolved — the `question` ones stop nothing by design and would otherwise die with the session that produced them. Each carries the commit and tree fingerprint it was observed against, which is NOT `subject_head_sha`: a reviewer looked at one task's worktree at one moment, and presenting that as an observation about the merged tree would be the overclaim this document exists to prevent.",
           "type": "array",

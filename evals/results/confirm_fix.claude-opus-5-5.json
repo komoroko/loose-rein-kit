@@ -1,0 +1,25 @@
+{
+  "scenario": "confirm_fix",
+  "guard": {
+    "file": "src/rein/build_prompts.py",
+    "section": "confirm_prompt",
+    "cr": "CR-93"
+  },
+  "models": [
+    "claude-opus-5-5"
+  ],
+  "cli": "2.1.312 (Claude Code)",
+  "where": "host",
+  "at": "2026-10-29T17:11:03+00:00",
+  "trials": 3,
+  "arms": {
+    "with": {
+      "passed": 3,
+      "prompt_digest": "sha256:ef7f1b378dfa6255d210522c6807a56d58f71def70abd20bfc09ced63a2db999"
+    },
+    "without": {
+      "passed": 0,
+      "prompt_digest": "sha256:86a378f19b33513358b21108add0325f13783916d3832b9e6033e6b47da13e4c"
+    }
+  }
+}

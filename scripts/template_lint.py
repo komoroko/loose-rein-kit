@@ -390,6 +390,83 @@ def check_scaffold_docs_classified(root: Path) -> list[str]:
     ]
 
 
+#: What rein hands an agent, section by section: the documents and the module that builds prompts.
+EVAL_DOCUMENTS = ("src/rein/data/prompts", "src/rein/data/rules/AGENTS.md")
+EVAL_MODULE = "src/rein/build_prompts.py"
+EVAL_INVENTORY = "evals/inventory.yaml"
+_WHOLE = "(whole)"
+
+
+def prompt_sections(root: Path) -> dict[str, list[str]]:
+    """Every section rein hands an agent: `## ` headings of each document, `*_prompt` functions of the module."""
+    out: dict[str, list[str]] = {}
+    for entry in EVAL_DOCUMENTS:
+        base = root / entry
+        for path in sorted(base.rglob("*.md")) if base.is_dir() else [base]:
+            heads = re.findall(r"^## (.+?)\s*$", path.read_text(encoding="utf-8"), flags=re.MULTILINE)
+            out[path.relative_to(root).as_posix()] = heads or [_WHOLE]
+    module = (root / EVAL_MODULE).read_text(encoding="utf-8")
+    out[EVAL_MODULE] = re.findall(r"^def ([a-z_]+_prompt)\(", module, flags=re.MULTILINE)
+    return out
+
+
+def eval_guards(root: Path) -> dict[str, tuple[str, str]]:
+    """Each scenario's guard as `{name: (file, section)}`, read from its module."""
+    import sys
+
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from evals import harness
+
+    return {name: (harness.load(name).guard.file, harness.load(name).guard.section) for name in harness.names()}
+
+
+def check_eval_inventory(
+    sections: dict[str, list[str]], inventory: object, guards: dict[str, tuple[str, str]]
+) -> list[str]:
+    """Every section is classified, every classification names a section, and a scenario guards what it is filed under.
+
+    The inventory is how "this prompt was tested" stops being a matter of memory (devr 論点 Q). A
+    section missing from it is one nobody has said anything about; an entry for a section that no
+    longer exists is a claim about nothing; and a `scenario:` entry whose scenario guards some other
+    section says a test holds a sentence it does not.
+    """
+    failures: list[str] = []
+    if not isinstance(inventory, dict):
+        return [f"{EVAL_INVENTORY}: must map each file to its sections"]
+    for path, heads in sections.items():
+        listed = inventory.get(path)
+        listed = listed if isinstance(listed, dict) else {}
+        failures += [f'{EVAL_INVENTORY}: {path} "{h}" is not classified' for h in heads if h not in listed]
+    for path, listed in inventory.items():
+        known = sections.get(str(path))
+        if known is None:
+            failures.append(f"{EVAL_INVENTORY}: {path} is not a file rein hands an agent")
+            continue
+        for head, kind in (listed or {}).items():
+            where = f'{EVAL_INVENTORY}: {path} "{head}"'
+            if head not in known:
+                failures.append(f"{where} names a section that does not exist")
+            elif kind in ("code", "unverified"):
+                continue
+            elif isinstance(kind, str) and kind.startswith("scenario:"):
+                name = kind.removeprefix("scenario:")
+                if guards.get(name) != (str(path), head):
+                    failures.append(f"{where}: scenario {name!r} does not guard this section")
+            else:
+                failures.append(f"{where}: {kind!r} is not `code`, `unverified` or `scenario:<name>`")
+    return failures
+
+
+def check_eval_guards(sections: dict[str, list[str]], guards: dict[str, tuple[str, str]]) -> list[str]:
+    """A scenario names a file and a section rein still hands an agent."""
+    return [
+        f'evals/scenarios/{name}.py guards {file} "{section}", which does not exist'
+        for name, (file, section) in sorted(guards.items())
+        if section not in sections.get(file, [])
+    ]
+
+
 def check_capability_mapping(mappings: dict[str, str], agents_text: str) -> list[str]:
     """Every capability mapping covers the same token set, and AGENTS.md defines every token.
 
@@ -1574,6 +1651,14 @@ def main(argv: list[str] | None = None) -> int:
         failures += check_upgrade_command(root)
         failures += check_distribution_name(root)
         failures += check_required_status_covers_every_job(root)
+        sections = prompt_sections(root)
+        guards = eval_guards(root)
+        failures += check_eval_guards(sections, guards)
+        failures += check_eval_inventory(
+            sections,
+            strict_yaml.load_mapping((root / EVAL_INVENTORY).read_text(encoding="utf-8"), what=EVAL_INVENTORY),
+            guards,
+        )
     except OSError as exc:
         logger.error(f"template-lint failed: {exc}")
         return 1

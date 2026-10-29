@@ -27,6 +27,7 @@ Layer 2's enums and this module's vocabulary constants are two spellings of one 
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -211,6 +212,37 @@ TASK_STATUS_VALUES = frozenset(TASK_STATUS_ORDER)
 # waiting to be picked up, merged into the fresh worktree, or left on its branch because merging
 # it conflicted (see state.schema.json `handoff`).
 SALVAGE_STATE_VALUES = frozenset({"pending", "restored", "conflict"})
+
+#: What marks an implementer's own decision among the `decision_declared` events, which other
+#: call sites use for salvage branches, resets and the PR-stack ledger. It is a decision whose
+#: reversal moves no claim, scope or acceptance criterion (one that would is a defect in the plan,
+#: reported `needs-revision`), so it is made and the task goes on; the tasks downstream are handed
+#: it, and the acceptance gate lists it for a human to overrule.
+LOCAL_DECISION = "local_decision"
+
+#: The fields a local decision is refused without. It is not asked, so the record is all the human
+#: gets: what was decided, why, what overruling it would mean redoing, and where it is. Prose
+#: alone does not hold a required field — an agent drops it, and the list it feeds goes quietly
+#: empty.
+LOCAL_DECISION_FIELDS: tuple[str, ...] = ("statement", "rationale", "undo", "anchor")
+
+#: The subject id a local decision is answered under at acceptance: stable across regenerations of
+#: the review, because it is derived from the chain event that recorded it.
+LOCAL_DECISION_ID_PREFIX = "LD-"
+
+
+def local_decision_id(event_id: str) -> str:
+    return LOCAL_DECISION_ID_PREFIX + hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:8]
+
+
+#: The subject id of what a confirming reader saw beyond a fix (`finding_observed`), as acceptance
+#: routes and repairs it. Derived from the recording event, like a local decision's.
+OBSERVATION_ID_PREFIX = "OB-"
+
+
+def observation_id(event_id: str) -> str:
+    return OBSERVATION_ID_PREFIX + hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:8]
+
 
 # What an implementer says about its own attempt, through `rein report`. Deliberately *not* the
 # task-status vocabulary: a status is a verdict the loop reaches, this is a claim the agent makes,
@@ -479,6 +511,17 @@ EVENT_ORDER: tuple[str, ...] = (
     # configured then.
     "reviews_applied",
     "decision_declared",
+    # A human overruled a decision an implementer made without asking (`LOCAL_DECISION`), at the
+    # acceptance gate. Its own kind because it is the moment that decision stops being the loop's
+    # and becomes a person's: `rein decisions` reads it as theirs, and the next `rein build` repairs
+    # the code it shaped.
+    "decision_overruled",
+    # A reader confirming a fix saw something beyond the fix (devr 論点 S). Not that fix's question,
+    # so it went back to nobody and spent no round; recorded so it is not lost, and carried by every
+    # review until a repair closes it (`observation_repaired`).
+    "finding_observed",
+    # A repair at acceptance landed for one `finding_observed`. What takes it off the next review.
+    "observation_repaired",
     # One lens was pointed at one deliverable, and whether it found anything. Outside
     # `ATTENTION_EVENTS`: it asks nobody to judge anything, it is what makes the library
     # answerable later. A lens that keeps being applied and never finds has the wrong condition
@@ -1938,6 +1981,16 @@ class Review:
     @property
     def extra_behaviors(self) -> tuple[Mapping[str, Any], ...]:
         return _maps(self.machine, "extra_behaviors")
+
+    @property
+    def local_decisions(self) -> tuple[Mapping[str, Any], ...]:
+        """What implementers decided without asking during this cycle, as the review was generated."""
+        return _maps(self.machine, "local_decisions")
+
+    @property
+    def observations(self) -> tuple[Mapping[str, Any], ...]:
+        """What readers confirming a fix saw beyond it and no repair has closed, as the review was generated."""
+        return _maps(self.machine, "observations")
 
     @property
     def review_findings(self) -> tuple[Mapping[str, Any], ...]:

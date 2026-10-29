@@ -235,6 +235,22 @@ class Graph:
                     stack.append(child)
         return result - set(seed_ids)
 
+    def dependencies_closure(self, seed_ids: Sequence[str]) -> set[str]:
+        """Every task the seeds stand on, transitively — what was built before them and under them.
+
+        The seeds are included: a bundle's members stand on each other in order. Unknown ids are
+        ignored; the caller validates.
+        """
+        result: set[str] = set()
+        stack = [tid for tid in seed_ids if tid in self._by_id]
+        while stack:
+            current = stack.pop()
+            if current in result:
+                continue
+            result.add(current)
+            stack.extend(self.get(current).blocked_by)
+        return result
+
     def frontier(self) -> list[Task]:
         """todo tasks startable right now (every blocker done). Ascending id."""
         result = [t for t in self.tasks if t.status == "todo" and all(self.get(dep).is_done for dep in t.blocked_by)]

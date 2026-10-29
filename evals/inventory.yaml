@@ -1,0 +1,98 @@
+# How each section of what rein hands an agent is held to account (devr 論点 Q).
+#
+# `code`: a mechanism enforces what the section says, whatever an agent makes of it.
+# `scenario:<name>`: a behaviour test in evals/scenarios/ holds a sentence of it, against a control.
+# `unverified`: neither. The section is a claim nothing has tested.
+#
+# `template_lint` refuses a section missing from here, an entry for a section that no longer exists,
+# and a `scenario:` entry whose scenario does not guard that section. Updated with every change
+# request that touches a prompt.
+
+src/rein/data/prompts/agents/adversarial-reviewer.md:
+  "Role": unverified
+  "Stance (strict)": unverified
+  "Working the lenses": unverified
+  "Questions added to the stage": unverified
+  "Reference: attack lenses — requirements (the mandate gate)": unverified
+  "Reference: attack lenses — design (the mandate gate)": unverified
+  "Reference: attack lenses — task plan (the mandate gate)": unverified
+  "Output": unverified
+src/rein/data/prompts/agents/architect.md:
+  "Role": unverified
+  "How to proceed": unverified
+  "If the product is an AI agent application (optional lens)": unverified
+  "Output": unverified
+src/rein/data/prompts/agents/implementer.md:
+  "How to proceed": scenario:scope_needs_revision
+  "Completion/escalation — always end with `rein report`": unverified
+  "Decisions the ticket does not settle": unverified
+src/rein/data/prompts/agents/requirements-analyst.md:
+  "Role": unverified
+  "How to proceed": unverified
+  "Output": unverified
+src/rein/data/prompts/commands/build.md:
+  "Prerequisite check (always first)": unverified
+  "The consumption algorithm": unverified
+  "Running it — `rein build`": unverified
+  "Quality-gate step notes": unverified
+  "When all tasks complete": unverified
+src/rein/data/prompts/commands/design.md:
+  "Where this sits": unverified
+  "Steps": unverified
+  "While the mandate is unapproved": unverified
+  "Next": unverified
+src/rein/data/prompts/commands/onboard.md:
+  "Scope guard (read first)": unverified
+  "Steps": unverified
+  "Entry points by starting state": unverified
+  "At each cycle close": unverified
+src/rein/data/prompts/commands/req.md:
+  "Steps": unverified
+  "While the mandate is unapproved": unverified
+  "Next": unverified
+src/rein/data/prompts/commands/revise.md:
+  "When to use it": unverified
+  "Steps": unverified
+  "Principles": unverified
+src/rein/data/prompts/commands/status.md:
+  "(whole)": unverified
+src/rein/data/prompts/commands/tasks.md:
+  "Where this sits": unverified
+  "Re-run after a roll back (reconcile, when tasks already exist)": unverified
+  "Steps": unverified
+  "While waiting for approval": unverified
+  "Once approved": unverified
+src/rein/data/prompts/commands/verify.md:
+  "Prerequisite check (always first)": unverified
+  "Steps": unverified
+  "Once approved": unverified
+src/rein/data/prompts/rules/gate-workflow.md:
+  "Gate self-assessment (required at every gate)": unverified
+  "While a gate is pending": unverified
+  "The human review before acceptance": unverified
+  "Context budget (context hygiene)": unverified
+  "Cycles, scope changes, hotfixes": unverified
+  "Enforcement detail (the gate rules' mechanism layer)": unverified
+  "The gates a cycle has": unverified
+  "Repo map": unverified
+src/rein/data/rules/AGENTS.md:
+  "Capability vocabulary (portable verbs)": unverified
+  "Language": unverified
+  "Development lifecycle": unverified
+  "Single Source of Truth (SSOT)": unverified
+  "Gate rules (strict)": unverified
+  "How many gates a cycle has": unverified
+  "Roll back (returning upstream)": unverified
+  "Task dependency graph": unverified
+  "Principles": unverified
+  "Security gate": unverified
+  "Branch / commit / permissions": unverified
+src/rein/build_prompts.py:
+  "implementer_prompt": unverified
+  "batch_review_prompt": scenario:review_empty
+  "confirm_prompt": scenario:confirm_fix
+  "gate_four_fix_prompt": unverified
+  "integration_review_fix_prompt": unverified
+  "integration_fix_prompt": unverified
+  "conflict_prompt": unverified
+  "integration_review_prompt": unverified

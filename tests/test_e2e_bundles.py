@@ -111,7 +111,8 @@ def build(repo: repo_mod.Repo) -> int:
 def state_of(repo: repo_mod.Repo) -> dict[str, dict[str, object]]:
     raw = store_mod.Store(repo).read_raw("state")
     assert raw is not None
-    return raw["tasks"]
+    tasks: dict[str, dict[str, object]] = raw["tasks"]
+    return tasks
 
 
 def test_the_sub_issues_of_one_issue_land_in_one_launch_and_one_commit(

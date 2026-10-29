@@ -1,0 +1,25 @@
+{
+  "scenario": "review_empty",
+  "guard": {
+    "file": "src/rein/build_prompts.py",
+    "section": "batch_review_prompt",
+    "cr": "CR-89"
+  },
+  "models": [
+    "claude-opus-5-5"
+  ],
+  "cli": "2.1.312 (Claude Code)",
+  "where": "host",
+  "at": "2026-10-29T17:16:59+00:00",
+  "trials": 3,
+  "arms": {
+    "with": {
+      "passed": 3,
+      "prompt_digest": "sha256:57b33eff9e7a2a5b74e75e69db451581c1ea8e6b0ca4686e029dcbe7d08da3d0"
+    },
+    "without": {
+      "passed": 1,
+      "prompt_digest": "sha256:b09744c15900844b011c4b6d42674603875007ff15f1dea7af9cdcaceaf15ec0"
+    }
+  }
+}

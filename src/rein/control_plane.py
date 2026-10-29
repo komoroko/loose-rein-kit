@@ -268,6 +268,10 @@ def _decision_event(capability: str, status: str = "") -> str:
 #: like any other: a report long enough to make `state.yaml` unwritable would take the loop down
 #: at exactly the moment it was carrying the reason.
 _REPORT_SUMMARY_MAX = 2000
+#: Caps mirroring `review.schema.json`'s `local_decisions`, where every decision is carried to the
+#: acceptance gate. Refused past them rather than cut: a decision shortened on the way is not the
+#: one the human is overruling.
+_DECISION_FIELD_MAX = {"statement": 2000, "rationale": 2000, "undo": 2000, "anchor": 512}
 _REPORT_PATH_MAX = 512
 _REPORT_TOUCHED_MAX = 128
 
@@ -302,12 +306,6 @@ def _report_patch(args: Mapping[str, Any]) -> dict[str, Any] | None:
 #: deciding who did what, so "a leaf recorded this" and "the orchestrator recorded this" must
 #: not print the same.
 LOCAL_RUN = "local"
-
-
-#: Risks at which an implementer's own decision stops being an implementation detail. Anything
-#: at or above this parks the task rather than proceeding — the human decides, not the agent
-#: that just invented the default (plan §16.5).
-ESCALATION_FLOOR = "medium"
 
 
 def _subject(token: Token, args: Mapping[str, Any]) -> str:
@@ -347,48 +345,49 @@ def _apply_request_once(repo: repo_mod.Repo, token: Token, request: Request) -> 
     if request.capability in {"decision.declare", "knowledge_gap.create"} and not statement:
         raise ControlPlaneError(f"{request.capability} needs a --statement")
 
-    risk = str(args.get("risk") or "low")
-    if risk not in models.RISK_VALUES:
-        raise ControlPlaneError(f"unknown risk {risk!r} (one of {', '.join(models.RISK_ORDER)})")
-
-    detail: dict[str, Any] = {
-        "statement": statement,
-        "category": str(args.get("category") or ""),
-        "risk": risk,
-        "anchor": str(args.get("anchor") or ""),
-        "run_id": token.run_id,
-    }
+    detail: dict[str, Any]
+    if request.capability == "decision.declare":
+        # Only a decision whose reversal moves no claim, scope or acceptance criterion is the
+        # implementer's to make, and it is made and the task goes on: one that would move them is
+        # a defect in the plan and leaves through `rein report --outcome needs-revision`. Nothing
+        # here parks a task. How much a decision matters does not decide who answers it.
+        fields = {name: str(args.get(name) or "").strip() for name in models.LOCAL_DECISION_FIELDS}
+        missing = [name for name, value in fields.items() if not value]
+        if missing:
+            raise ControlPlaneError(f"decision.declare needs {', '.join('--' + m for m in missing)}")
+        too_long = [name for name, value in fields.items() if len(value) > _DECISION_FIELD_MAX[name]]
+        if too_long:
+            raise ControlPlaneError(
+                f"decision.declare: {', '.join('--' + n for n in too_long)} is longer than the review can carry "
+                f"({', '.join(f'{n} {_DECISION_FIELD_MAX[n]}' for n in too_long)} characters)"
+            )
+        detail = {**fields, "category": str(args.get("category") or "")}
+        # Only an attempt's decision is one the loop made without asking. A person at the canonical
+        # checkout is the human it would have been put to; theirs is recorded and listed nowhere.
+        if token.run_id != LOCAL_RUN:
+            detail["kind"] = models.LOCAL_DECISION
+    else:
+        detail = {
+            "statement": statement,
+            "category": str(args.get("category") or ""),
+            "anchor": str(args.get("anchor") or ""),
+        }
+    detail["run_id"] = token.run_id
     detail = {k: v for k, v in detail.items() if v}
-
-    # A decision at or above the escalation floor is not the implementer's to make: it changes
-    # behaviour the plan did not describe. Park the task and let the human reconcile it.
-    #
-    # Only an attempt's decision escalates. A person at the canonical checkout (no token) *is* the
-    # human it would escalate to, and has no attempt to park: parking by name moved whatever task
-    # they named — a `done` one included, re-opened under every dependent standing on it, which is
-    # what `rein task reset` refuses. Their decision is recorded; sending a task back is that verb's.
-    escalates = (
-        request.capability == "decision.declare"
-        and token.run_id != LOCAL_RUN
-        and models.risk_at_least(risk, ESCALATION_FLOOR)
-    )
 
     raw = json.loads(json.dumps(state.raw))
     status = ""
-    writes_state = escalates or request.capability == "task.status"
+    writes_state = request.capability == "task.status"
     if writes_state:
         # An implementer's own account of its attempt rides along with the status it implies. It
         # is stored beside the handoff the *next* attempt inherits, not merged into the verdict:
         # `touched` is a claim the loop checks against the real diff, never a substitute for it.
-        report = _report_patch(args) if request.capability == "task.status" else None
-        if escalates:
-            status = "needs-revision"
-        elif report is not None:
-            # Derived here, never taken from the request: the outcomes only ever narrow what
-            # happens next, and a status the caller names is how one of them would stop doing so.
-            status = _OUTCOME_STATUS[report["outcome"]]
-        else:
+        report = _report_patch(args)
+        if report is None:
             raise ControlPlaneError(f"task.status needs an outcome (one of {', '.join(models.AGENT_OUTCOME_ORDER)})")
+        # Derived here, never taken from the request: the outcomes only ever narrow what
+        # happens next, and a status the caller names is how one of them would stop doing so.
+        status = _OUTCOME_STATUS[report["outcome"]]
         if not task_id:
             raise ControlPlaneError(
                 "no task to record against: this call carries no capability token (it is not a running "
@@ -399,17 +398,15 @@ def _apply_request_once(repo: repo_mod.Repo, token: Token, request: Request) -> 
         current = str(entry.get("status", "todo"))
         if current != "in-progress":
             raise ControlPlaneError(
-                f"{task_id} is {current}, not in-progress: a report or an escalation belongs to the attempt "
+                f"{task_id} is {current}, not in-progress: a report belongs to the attempt "
                 "that is running it, and no attempt is"
             )
-        updated = {**entry, "status": status}
-        if report is not None:
-            previous = entry.get("handoff")
-            handoff = dict(previous) if isinstance(previous, dict) else {}
-            handoff["report"] = report
-            handoff["updated_at"] = report["at"]
-            updated["handoff"] = handoff
-            detail = {**detail, "outcome": report["outcome"]}
+        previous = entry.get("handoff")
+        handoff = dict(previous) if isinstance(previous, dict) else {}
+        handoff["report"] = report
+        handoff["updated_at"] = report["at"]
+        updated = {**entry, "status": status, "handoff": handoff}
+        detail = {**detail, "outcome": report["outcome"]}
         tasks[task_id] = updated
         raw["updated_at"] = event_chain.now_iso()
 
@@ -424,17 +421,7 @@ def _apply_request_once(repo: repo_mod.Repo, token: Token, request: Request) -> 
             detail=detail,
         )
 
-    return {
-        "recorded": request.capability,
-        "task": task_id,
-        "escalated": escalates,
-        "note": (
-            f"risk {risk} is at or above '{ESCALATION_FLOOR}': {task_id} is now needs-revision and waits "
-            "for a human. Stop work on it."
-            if escalates
-            else "recorded in the central audit chain"
-        ),
-    }
+    return {"recorded": request.capability, "task": task_id, "note": "recorded in the central audit chain"}
 
 
 # --- the server ----------------------------------------------------------------
@@ -662,8 +649,8 @@ def report_main(argv: list[str] | None = None) -> int:
     the same capability token as every other leaf record, so a report survives the worktree it
     was written in. And it can only ever narrow what happens next: `blocked` and `needs-revision`
     park the task, `implemented` claims nothing and merely opens the quality gate, and there is
-    no outcome that marks anything done. Exit 2 when the report parked the task — the same
-    convention `rein decision add` uses for an escalation.
+    no outcome that marks anything done. Exit 2 when the report parked the task: the attempt is
+    over and the task is not this agent's to finish.
     """
     parser = argparse.ArgumentParser(
         prog="rein report",
@@ -716,15 +703,19 @@ def _build_parser(prog: str, capability: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=prog, description=f"record a {prog.split()[-1]} in the central audit chain")
     parser.add_argument("action", choices=["add"], help="the only verb: a record is added, never edited or removed")
     parser.add_argument("--task", default="", help="the task this concerns (e.g. T-002)")
-    parser.add_argument("--statement", required=True, help="what was decided, or what is not known")
+    if capability == "decision.declare":
+        parser.add_argument("--statement", required=True, help="what was decided")
+        parser.add_argument("--rationale", required=True, help="why this and not the alternative")
+        parser.add_argument(
+            "--undo",
+            required=True,
+            help="what overruling it would mean redoing: which tasks, which paths",
+        )
+        parser.add_argument("--anchor", required=True, help="where in the code (path:line)")
+    else:
+        parser.add_argument("--statement", required=True, help="what is not known")
+        parser.add_argument("--anchor", default="", help="where in the code (path:line)")
     parser.add_argument("--category", default="", help="e.g. default | timeout | retry | error-handling")
-    parser.add_argument(
-        "--risk",
-        default="low",
-        choices=list(models.RISK_ORDER),
-        help=f"at or above '{ESCALATION_FLOOR}' the task is parked for a human",
-    )
-    parser.add_argument("--anchor", default="", help="where in the code (path:line)")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     parser.set_defaults(capability=capability)
     return parser
@@ -738,27 +729,18 @@ def _run(parser: argparse.ArgumentParser, argv: list[str] | None) -> int:
     except repo_mod.RepoNotFoundError as exc:
         logger.error(str(exc))
         return 1
+    fields = ("task", "statement", "category", "anchor", "rationale", "undo")
     try:
-        result = route(
-            repo,
-            args.capability,
-            {
-                "task": args.task,
-                "statement": args.statement,
-                "category": args.category,
-                "risk": args.risk,
-                "anchor": args.anchor,
-            },
-        )
+        result = route(repo, args.capability, {name: getattr(args, name) for name in fields if hasattr(args, name)})
     except (ControlPlaneError, models.DocumentError, store_mod.StoreError) as exc:
         logger.error(str(exc))
         return 1
     print(result.get("note", "recorded"))
-    return 2 if result.get("escalated") else 0
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    """`rein decision add …` — exit 2 when the record parked the task for a human."""
+    """`rein decision add …` — a decision the implementer made and went on with."""
     return _run(_build_parser("rein decision", "decision.declare"), argv)
 
 

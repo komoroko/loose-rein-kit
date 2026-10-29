@@ -12,7 +12,7 @@ outside the loop, which is what keeps statuses, merges and the audit chain machi
 > **When dependencies are missing (branch-base mismatch)**: an isolated worktree may be based on the default branch rather than the work branch, so **the deliverables or task tickets of prerequisite (foundation) tasks may be absent**. In that case do not rebuild them on your own; **pull the work branch into your branch** (`git merge <work-branch>`, `--ff-only` if possible; do not change the work branch) to satisfy dependencies before implementing. If the prerequisites are still not in place after pulling, report as `blocked`.
 
 ## How to proceed
-0. **Read your dossier first — `.rein/work/T-NNN.json`.** The caller assembles it fresh for every launch out of the frozen plan, the current diff and the audit chain, so it is what the *system* knows rather than what you would go and re-derive: the claims this task answers and what each one asserts, the paths you are scoped to, what has already changed (with lockfiles and generated files summarized rather than spelled out), what earlier attempts tried and what a human wrote when they reset the task (`history`, oldest first — a `reset` line is addressed to you, and is usually the input the last attempt was missing), and which role and sandbox you are running as. Trust it over anything you would reconstruct yourself, and do not go re-reading what it already contains.
+0. **Read your dossier first — `.rein/work/T-NNN.json`.** The caller assembles it fresh for every launch out of the frozen plan, the current diff and the audit chain, so it is what the *system* knows rather than what you would go and re-derive: the claims this task answers and what each one asserts, the paths you are scoped to, what has already changed (with lockfiles and generated files summarized rather than spelled out), what earlier attempts tried and what a human wrote when they reset the task (`history`, oldest first — a `reset` line is addressed to you, and is usually the input the last attempt was missing), what the tasks yours builds on decided without asking anyone (`upstream_decisions` — build on them; where yours has to differ, record that as a decision of your own that names theirs), and which role and sandbox you are running as. Trust it over anything you would reconstruct yourself, and do not go re-reading what it already contains.
 1. Then read the specified `docs/tasks/T-NNN.md` and, in `docs/20-design.md`, **the design section(s) covering your task's requirement (`req: R-x`)** — do not load the whole design doc beyond what your task needs (keeping the read lean avoids *Lost in the Middle*; see `.rein/prompts/rules/gate-workflow.md` "Context budget"). Then read the existing code.
 2. **Reusing existing functions, utilities, and patterns comes first.** Match the conventions, naming, and style of the surrounding code.
 3. **Implement the minimum the ticket's acceptance criteria require (YAGNI).** No speculative generality: no config knobs, hooks, abstraction layers, or "while I'm here" extras that no acceptance criterion asks for — an unrequested capability is scope creep even when it seems obviously useful. If you believe something more is genuinely needed, report it instead of building it.
@@ -49,5 +49,22 @@ a mismatch is a finding the caller raises, and so is a diff that is empty when y
 `implemented`.
 
 The caller (the /build loop) reaches the verdict and writes the status; it never takes yours.
-Use `rein decision add` for an implementation decision worth recording along the way, and
-`rein knowledge-gap add` for something you could not find out.
+
+## Decisions the ticket does not settle
+
+Sort each one by what overruling it later would move:
+
+- **A claim, the scope, or an acceptance criterion** — it is not yours to make. It is a defect in
+  the plan: end the attempt with `--outcome needs-revision` and say what the plan leaves open.
+
+```sh
+rein decision add --statement "retry the upload 3 times, then fail the batch" \
+    --rationale "the API documents transient 503s; a failed batch is re-runnable" \
+    --undo "T-004: src/upload.py and its tests" --anchor src/upload.py:42
+```
+
+`--undo` names what overruling it would mean redoing — this task's paths, or another task's
+that builds on it. A decision that reaches into other tasks is still yours when it moves no claim,
+scope or criterion; say so in `--undo`.
+
+Use `rein knowledge-gap add --statement …` for something you could not find out.

@@ -74,7 +74,7 @@ import threading
 import time
 import urllib.parse
 import webbrowser
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
@@ -95,6 +95,7 @@ from rein import (
     lens_cmd,
     models,
     notify,
+    repair,
     review_api,
     reviews_cmd,
     run_progress,
@@ -300,6 +301,21 @@ def _answered(
         return human
     card_id, choice, confidence = answer
     return human_review.record_decision(review, human, card_id, choice, confidence=confidence, reason=note)
+
+
+def _overrule(
+    review: models.Review, human: Mapping[str, object], subject: str, action: str, note: str
+) -> dict[str, object]:
+    """Overrule one decision an implementer made without asking: the code it shaped is to be repaired.
+
+    The one answer a local decision takes. There is no "keep it": approving keeps it, and an
+    answer that changes nothing is not an answer this screen records.
+    """
+    if action != repair.REPAIRS_THE_CODE:
+        raise ValueError(f"a local decision is overruled with `{repair.REPAIRS_THE_CODE}`, not `{action}`")
+    if not any(str(d.get("id")) == subject for d in review.local_decisions):
+        raise ValueError(f"{subject} is not a standing decision in this review")
+    return human_review.record_disposition(dict(human), subject, action, note=note)
 
 
 class UiActionError(Exception):
@@ -1036,6 +1052,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if subject.startswith("SCOPE-") and action in _SCOPE_DECISIONS:
             self._record_scope_decision(body, subject, action, note)
+            return
+        if subject.startswith(models.LOCAL_DECISION_ID_PREFIX):
+            self._review_mutate(
+                body,
+                "disposition_recorded",
+                lambda review, human: _overrule(review, human, subject, action, note),
+            )
             return
         self._review_mutate(
             body,

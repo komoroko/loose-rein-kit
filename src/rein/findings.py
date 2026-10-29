@@ -65,6 +65,9 @@ class Attribution:
     task_id: str
     #: What decided it — the anchor path, or the claim id. Printed so the mapping can be argued with.
     basis: str
+    #: What the repair needs to be told beyond the id, when the review holds it nowhere a repairer
+    #: reads by id — an overruled decision's statement.
+    detail: str = ""
 
     @property
     def owned(self) -> bool:
@@ -138,12 +141,60 @@ def attribute(tasks: Sequence[Owner], review: models.Review | None) -> list[Attr
         task_id, basis = _first_owned(tasks, paths)
         found.append(Attribution(str(extra.get("id", "EXTRA-?")), "extra_behavior", task_id, basis))
 
+    # What a reader confirming a fix saw beyond it during the build. It went back to nobody there;
+    # here it is a finding like any other, charged to the scope that owns its anchor.
+    for observation in review.observations:
+        path = str(observation.get("anchor", "")).rsplit(":", 1)[0]
+        task_id, basis = _first_owned(tasks, [path] if path else [])
+        found.append(
+            Attribution(
+                str(observation.get("id", "OB-?")),
+                "observation",
+                task_id,
+                basis,
+                detail=str(observation.get("statement", "")),
+            )
+        )
+
     for result in review.claim_results:
         if str(result.get("verdict", "")) not in FAILING_VERDICTS:
             continue
         claim_id = str(result.get("claim_id", ""))
         owner = next((t.id for t in tasks if claim_id in t.claim_ids), "")
         found.append(Attribution(claim_id, "claim", owner, claim_id))
+    return found
+
+
+def overruled_decisions(tasks: Sequence[Owner], review: models.Review | None, ids: set[str]) -> list[Attribution]:
+    """The local decisions a human overruled, with the task that has to repair the code they shaped.
+
+    Attributed by the decision's own anchor, like a finding, before the task that recorded it: the
+    decision may have been made in one task about code another task's scope owns.
+    """
+    if review is None or not review.is_generated:
+        return []
+    found: list[Attribution] = []
+    for decision in review.local_decisions:
+        decision_id = str(decision.get("id", ""))
+        if decision_id not in ids:
+            continue
+        path = str(decision.get("anchor", "")).rsplit(":", 1)[0]
+        task_id, basis = _first_owned(tasks, [path] if path else [])
+        if not task_id:
+            # No scope owns the anchor, but the decision has an author the plan does name: the task
+            # whose attempt made it. Unlike a finding, this is not a guess.
+            recorder = str(decision.get("task", ""))
+            task_id = next((t.id for t in tasks if t.id == recorder), "")
+            basis = f"recorded by {recorder}" if task_id else basis
+        found.append(
+            Attribution(
+                decision_id,
+                "local_decision",
+                task_id,
+                basis,
+                detail=f"overruled: {decision.get('statement', '')} (it recorded: {decision.get('rationale', '')})",
+            )
+        )
     return found
 
 

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +118,7 @@ def build(
     history: Sequence[Mapping[str, Any]] = (),
     handoff: Mapping[str, Any] | None = None,
     env: Mapping[str, Any] | None = None,
+    upstream_decisions: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Assemble one task's dossier. Pure apart from `repo_path`, which reads the pinned sources.
 
@@ -161,6 +163,11 @@ def build(
         # So the reviewer does not re-derive the objection it already made, and so the implementer
         # can see what was said about the work it is continuing.
         document["review"] = {"findings": list(review["findings"])}
+    if upstream_decisions:
+        # What the tasks this one stands on decided without asking anyone. Their code is in the
+        # tree, but why it is that way is not, and building on it without knowing would be how one
+        # decision gets silently contradicted by the next.
+        document["upstream_decisions"] = [dict(entry) for entry in upstream_decisions]
     if env:
         document["env"] = dict(env)
     return document
@@ -238,6 +245,69 @@ def parse_batch_findings(raw: str, task_ids: Sequence[str]) -> tuple[dict[str, l
         raise FindingsError(f"findings for {', '.join(unknown)}, which this review was not shown")
     by_task = {task_id: _findings_of(entries[task_id]) for task_id in task_ids if task_id in entries}
     return by_task, [task_id for task_id in task_ids if task_id not in by_task]
+
+
+@dataclass(frozen=True)
+class Confirmation:
+    """What a confirming reader said about one subject's open findings after a fix.
+
+    `open` are the findings it judged not closed, as they were raised, with why. `new` is breakage
+    it found inside the fix itself. `outside` is what it saw beyond the fix: it does not go back to
+    this implementer and spends none of this subject's rounds — it is carried to acceptance.
+    """
+
+    open: list[dict[str, Any]]
+    new: list[dict[str, Any]]
+    outside: list[dict[str, Any]]
+
+
+def parse_confirmation(
+    raw: str, priors: Mapping[str, Sequence[Mapping[str, Any]]]
+) -> tuple[dict[str, Confirmation], list[str]]:
+    """A confirming reader's answer per subject, and the subjects it wrote no entry for.
+
+    **Every finding it was handed gets a verdict, or the answer is refused.** A finding left out
+    is neither closed nor open, and reading silence as either is how a review stops meaning
+    anything: as closed it lets a defect land, as open it spends a round on nothing.
+    """
+    document = _document(raw)
+    if not isinstance(document, dict) or not isinstance(document.get("tasks"), dict):
+        raise FindingsError("the confirmation must be an object with a `tasks` mapping")
+    entries = document["tasks"]
+    unknown = sorted(str(key) for key in entries if key not in priors)
+    if unknown:
+        raise FindingsError(f"a confirmation for {', '.join(unknown)}, which this reading was not shown")
+    answered: dict[str, Confirmation] = {}
+    for subject, findings in priors.items():
+        if subject not in entries:
+            continue
+        entry = entries[subject]
+        if not isinstance(entry, dict) or not isinstance(entry.get("confirm"), list):
+            raise FindingsError(f"{subject}: a confirmation needs a `confirm` list")
+        verdicts: dict[int, tuple[bool, str]] = {}
+        for index, verdict in enumerate(entry["confirm"]):
+            if not isinstance(verdict, dict) or not isinstance(verdict.get("closed"), bool):
+                raise FindingsError(f"{subject}: confirm[{index}] needs `finding` and a boolean `closed`")
+            number = verdict.get("finding")
+            if not isinstance(number, int) or not 1 <= number <= len(findings) or number in verdicts:
+                raise FindingsError(
+                    f"{subject}: confirm[{index}] names finding {number!r}, which is not one of 1..{len(findings)} once"
+                )
+            verdicts[number] = (verdict["closed"], str(verdict.get("why", "")).strip()[:_FINDING_TEXT_MAX])
+        missing = [n for n in range(1, len(findings) + 1) if n not in verdicts]
+        if missing:
+            raise FindingsError(f"{subject}: no verdict on finding(s) {', '.join(map(str, missing))}")
+        still = [
+            {**dict(findings[n - 1]), **({"why_open": why} if why else {})}
+            for n, (closed, why) in sorted(verdicts.items())
+            if not closed
+        ]
+        answered[subject] = Confirmation(
+            open=still,
+            new=_findings_of({"findings": entry.get("findings", [])}),
+            outside=_findings_of({"findings": entry.get("outside", [])}),
+        )
+    return answered, [subject for subject in priors if subject not in answered]
 
 
 def _document(raw: str) -> Any:

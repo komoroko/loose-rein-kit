@@ -1,0 +1,25 @@
+{
+  "scenario": "scope_needs_revision",
+  "guard": {
+    "file": "src/rein/data/prompts/agents/implementer.md",
+    "section": "How to proceed",
+    "cr": "CR-89"
+  },
+  "models": [
+    "claude-opus-5-5"
+  ],
+  "cli": "2.1.312 (Claude Code)",
+  "where": "host",
+  "at": "2026-10-29T17:19:07+00:00",
+  "trials": 3,
+  "arms": {
+    "with": {
+      "passed": 2,
+      "prompt_digest": "sha256:5c71c0a5667b63b1c8a531663e235b42830283c809a154b6ead208a0c19cd7bf"
+    },
+    "without": {
+      "passed": 0,
+      "prompt_digest": "sha256:fb65f1911b3568edd40ce988283ab6edd03014344788b617304fed4b84e40ccd"
+    }
+  }
+}

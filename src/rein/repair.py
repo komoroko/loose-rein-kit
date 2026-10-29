@@ -58,7 +58,10 @@ class Repair:
     items: tuple[findings_mod.Attribution, ...]
 
     def render(self) -> str:
-        return "\n".join(f"- {a.finding_id} ({a.kind}) at {a.basis or 'no anchor'}" for a in self.items)
+        return "\n".join(
+            f"- {a.finding_id} ({a.kind}) at {a.basis or 'no anchor'}" + (f": {a.detail}" if a.detail else "")
+            for a in self.items
+        )
 
 
 @dataclass(frozen=True)
@@ -135,10 +138,18 @@ def route(
         if not attribution.owned:
             unowned.append(attribution)
             continue
-        if attribution.kind == "finding" or attribution.finding_id in decided:
+        if attribution.kind in {"finding", "observation"} or attribution.finding_id in decided:
             by_task.setdefault(attribution.task_id, []).append(attribution)
         else:
             judgement.append(attribution)
+    # A decision an implementer made without asking is not a finding and asks nothing on its own.
+    # It becomes a repair only when a human overruled it — the same "the code is what is wrong" as
+    # a card answered `revise_implementation`.
+    for attribution in findings_mod.overruled_decisions(tasks, review, decided):
+        if attribution.owned:
+            by_task.setdefault(attribution.task_id, []).append(attribution)
+        else:
+            unowned.append(attribution)
 
     order = [task.id for task in tasks]
     code = tuple(

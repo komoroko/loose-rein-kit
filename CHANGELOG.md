@@ -10,8 +10,11 @@ new one). `pyproject.toml [project] version` is the single version source.
 flight.** `plan.yaml`'s `tasks` is replaced by `issues`, each holding its `sub_issues`, so a plan
 written by 0.15.0 does not read: finish a running cycle on 0.15.0, or `rein revise --to mandate` and
 re-cut its tasks into issues. A repository between cycles needs `rein sync --force`. `state.yaml`
-gains a sub-issue's `unbundled`, the event log gains `bundle_landed` and `bundle_split`, and
-`config.yaml` gains `project.language`. Seven change requests (CR-81 to CR-87).
+gains a sub-issue's `unbundled`, the event log gains `bundle_landed`, `bundle_split`,
+`decision_overruled`, `finding_observed` and `observation_repaired`, `review.yaml`'s machine half
+gains `local_decisions` and `observations`, and `config.yaml` gains `project.language`. **`rein
+decision add` no longer takes `--risk`** and requires `--rationale`, `--undo` and `--anchor`.
+Thirteen change requests (CR-81 to CR-93).
 
 - **The plan has two levels: issues, and the sub-issues a human approves (CR-81).** A sub-issue is
   what a task was, less its place in the DAG: scope, criteria, claims and irreversible declarations,
@@ -60,6 +63,47 @@ gains a sub-issue's `unbundled`, the event log gains `bundle_landed` and `bundle
   typing. Conversation stays in the person's language, and what the code prints stays English. **A
   repository that wrote its documents in another language reads `en` once it upgrades**: set
   `project.language: ja` (or its tag) in `config.yaml`.
+- **The sentences rein hands an agent are tested against a control (CR-88, CR-89).** `evals/` holds
+  behaviour tests: each scenario builds a repository, hands a real agent CLI the prompt rein would,
+  and reads what the launch left — the `rein` calls a stub on PATH records, the files, the findings
+  file — never a model's opinion of it. It runs in two arms, with and without the one sentence it
+  guards, and records both counts under `evals/results/` per scenario and model; there is no pass
+  mark. `make eval EVAL_WHERE="--host"` (or `--profile <oci-agent profile>`) runs them; they are not
+  part of `check` or CI. `evals/inventory.yaml` classifies every section of the prompts, the rules and
+  `build_prompts.py` as `code`, `unverified` or `scenario:<name>`, and `template_lint` refuses a
+  section nobody classified, an entry for a section that is gone, and a scenario filed under a section
+  it does not guard. Three scenarios to start: an implementer whose criterion needs a path outside its
+  scope says so first, a reviewer of a sound change writes an empty list, and a confirming reader
+  closes a correct fix. A fourth, an implementer facing an open choice records it and goes on, passed
+  as often without its sentence as with it, and again once the choice reached into another task; the
+  sentence is gone from `implementer.md`, and the example command and `--undo` carry the behaviour.
+- **What an implementer decides is sorted by what overruling it would move, not by how much it
+  matters (CR-90).** `rein decision add --risk` parked the task for a human at `medium` and above, on
+  a risk the implementer chose and that no prompt explained. A decision that would move a claim, the
+  scope or a criterion is a defect in the plan and leaves through `rein report --outcome
+  needs-revision`; every other one is made, recorded with why and what overruling it would redo, and
+  the task goes on.
+- **Acceptance lists every decision made without asking, and any can be overruled (CR-91).** The
+  review carries the cycle's standing local decisions (`machine.local_decisions`, from the chain), the
+  residue names them, and the decision screen offers one act on each: overrule it, saying what it
+  should be instead. An overruled decision holds the gate until `rein build` has repaired the code it
+  shaped — at its cause, with a test that fails before — and then it is recorded in the chain as the
+  person's (`decision_overruled`), counted as `reach_overruled` `too_local`, and listed by `rein
+  decisions`.
+- **A task is handed what the tasks under it decided (CR-92).** The dossier carries
+  `upstream_decisions`: every local decision recorded by a task this one stands on, transitively.
+- **After a fix, the reading confirms it instead of reading the change again (CR-93).** A sent-back
+  task, and a join sent to the integration fixer, used to be read whole a second time, so a reader's
+  variance could raise something new in code the fix never touched and spend the task's rounds on it.
+  The next reading is handed the findings and the fix (`git diff <head the first reading saw>..`), gives
+  each finding a verdict, and looks for breakage inside the fix only. What it sees beyond the fix is
+  recorded (`finding_observed`), carried by the review (`machine.observations`) and repaired at
+  acceptance like a finding, without spending the task's rounds. Each confirmation is a
+  `reviews_applied` reading with `confirm: true` and the count it saw beyond the fix, zero included.
+  What the join's first reading said beside its must-fix findings is filed once the join is confirmed,
+  since no later reading says it again. Acceptance's own repair rounds still
+  read the moved reading whole: that reading is acceptance's discovery, and what it finds already
+  reaches the person at the gate.
 
 ## [0.15.0] - 2026-10-26
 

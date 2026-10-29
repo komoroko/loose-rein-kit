@@ -76,9 +76,13 @@ def seeded(tmp_path: Path) -> repo_mod.Repo:
 class Agents:
     """A fake claude: an implementer in a leaf's worktree, a reviewer at the repository root."""
 
-    def __init__(self, must_fix: dict[str, int]) -> None:
+    def __init__(self, must_fix: dict[str, int], outside: dict[str, str] | None = None) -> None:
         #: task id → how many review rounds still find a `must_fix` in it
         self.must_fix = dict(must_fix)
+        #: task id → what a confirming reader sees beyond the fix, once
+        self.outside = dict(outside or {})
+        #: task id → what each confirming reader was asked to confirm, per reading
+        self.confirmed: dict[str, list[str]] = {}
         self.reviews: list[list[str]] = []
         self.implementers: dict[str, list[list[str]]] = {}
         #: task id → what the diff command the reviewer was handed printed, per reading
@@ -90,6 +94,30 @@ class Agents:
         if not cmd or cmd[0] != "claude":
             return common.run(cmd, cwd, timeout)
         where = Path(cwd or ".")
+        if "You are confirming whether a fix closed" in cmd[-1]:
+            ids = re.findall(r"^- \*\*(T-\d+)\*\*", cmd[-1], flags=re.MULTILINE)
+            self.reviews.append(ids)
+            confirmations: dict[str, Any] = {}
+            for tid in ids:
+                sent = re.findall(rf"^  \d+\. (.*{tid}.*)$", cmd[-1], flags=re.MULTILINE)
+                self.confirmed.setdefault(tid, []).extend(sent)
+                still = self.must_fix.get(tid, 0) > 0
+                if still:
+                    self.must_fix[tid] -= 1
+                outside = self.outside.pop(tid, "")
+                confirmations[tid] = {
+                    "confirm": [{"finding": n, "closed": not still, "why": "w"} for n in range(1, len(sent) + 1)],
+                    "findings": [],
+                    "outside": [{"severity": "must_fix", "statement": outside, "anchor": "src/other.py:9"}]
+                    if outside
+                    else [],
+                }
+            written = re.search(r"Write your answer to `([^`]+)`", cmd[-1])
+            assert written, "the confirming reader was not told where to write"
+            target = where / written.group(1)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"tasks": confirmations}), encoding="utf-8")
+            return 0, agent_envelope("")
         if "(the quality gate's agent step)" in cmd[-1]:
             ids = re.findall(r"^- \*\*(T-\d+)\*\*", cmd[-1], flags=re.MULTILINE)
             self.reviews.append(ids)
@@ -160,6 +188,32 @@ def test_a_must_fix_goes_back_to_the_session_that_wrote_it_and_only_that_task_is
     assert [len(agents.implementers[tid]) for tid in ("T-002", "T-004")] == [1, 1], "a sound leaf was sent back"
     assert all(status_of(repo, tid) == "done" for tid in LEAVES)
     assert "round 2" in git(Path(repo.root), "show", f"{WORK_BRANCH}:src/T-003.py"), "the fix is what landed"
+
+
+def test_the_reading_after_a_fix_confirms_what_was_sent_and_carries_what_it_saw_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """devr 論点 S. The second reading is handed the finding and the fix, not the whole change again.
+    What it notices in code the fix never touched does not send the task back — the task lands — and
+    it is not dropped: it is in the chain, and the next review carries it to acceptance."""
+    from rein import events as events_mod
+
+    repo = seeded(tmp_path)
+    agents = Agents({"T-003": 1}, outside={"T-003": "the retry helper swallows the error"})
+    monkeypatch.setattr(build_loop, "_run", agents)
+
+    assert build(repo) == common.EXIT_DONE
+
+    assert agents.confirmed == {"T-003": ["src/T-003.py:1: T-003 drops the guard"]}
+    assert status_of(repo, "T-003") == "done"
+    events = store_mod.Store(repo).read_events()
+    [observed] = events_mod.open_observations(events, events[0].cycle_id)
+    assert observed["statement"] == "the retry helper swallows the error"
+    assert observed["seen_in"] == "T-003" and observed["anchor"] == "src/other.py:9"
+    [recorded] = [e for e in events if e.event == "finding_observed"]
+    assert recorded.detail["confirming"] == ["src/T-003.py:1: T-003 drops the guard"]
+    confirmations = [e for e in events if e.event == "reviews_applied" and e.detail.get("confirm")]
+    assert [(e.subject_ids, e.detail["outside"]) for e in confirmations] == [(("T-003",), 1)]
 
 
 def test_a_finding_that_outlives_the_rounds_holds_back_its_task_and_nothing_else(
