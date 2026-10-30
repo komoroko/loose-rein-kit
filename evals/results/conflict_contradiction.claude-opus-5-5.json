@@ -1,0 +1,31 @@
+{
+  "scenario": "conflict_contradiction",
+  "guard": {
+    "file": "src/rein/build_prompts.py",
+    "section": "conflict_prompt",
+    "cr": "CR-97"
+  },
+  "model": "claude-opus-5-5",
+  "cli": "2.1.314 (Claude Code)",
+  "where": "host",
+  "scenario_digest": "sha256:7faf0f5b15cdbf65c76157416d2fab0261fb4654f5f1627ea66487d2c0defe42",
+  "launch_digests": {
+    "with": "sha256:bc270ef7e804a100fcc278e46fbb268d29af0af162162120138703c386164b09",
+    "without": "sha256:61e76c6fd17c9302884a93596f680ce8d26e2181ae0237454cbfea1e6ae59e15"
+  },
+  "runs": [
+    {
+      "at": "2026-10-30T03:29:55+00:00",
+      "trials": 5,
+      "with": 4,
+      "without": 0
+    }
+  ],
+  "trials": 5,
+  "passed": {
+    "with": 4,
+    "without": 0
+  },
+  "p": 0.0238,
+  "verdict": "holds"
+}

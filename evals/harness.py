@@ -19,13 +19,26 @@ with (a stub on PATH records them), the files it wrote, its findings file — is
 behaviour that leaves nothing to read cannot have a scenario, and that is a finding about the
 sentence rather than a gap in this file.
 
-**Where it runs is the operator's choice, and it is recorded.** `--profile <name>` launches inside
-that `kind: oci-agent` profile of this repository's `.rein/config.yaml`; `--host` launches on this
-machine, with this user's CLI login. Neither is assumed.
+**Where it runs and which model answers are the operator's choice, and both are recorded.**
+`--profile <name>` launches inside that `kind: oci-agent` profile of this repository's
+`.rein/config.yaml`; `--host` launches on this machine, with this user's CLI login. `--model` is
+passed to the CLI, and a launch that reports another model answering is refused. None is assumed.
 
-**What is kept.** A run's record — the model, the CLI's version, each arm's prompt digest and count
-— replaces the previous one for the same scenario and model under `evals/results/`. The scratch
-repositories and transcripts are deleted once the record is written.
+**A record is about the launch it measured (devr 論点 T).** Its key is each arm's launch digest —
+the command, the prompt and the repository the agent was handed — the scenario's own digest — its
+fixture and its score — the model, the CLI's version and where it ran. `template_lint` rebuilds the
+launches from the sources as they stand and refuses a record whose digests no longer match: a count
+measured on a prompt that has since changed is not evidence about the one that ships.
+
+**Judged by the difference, and trials are added, never re-drawn.** Each run spends the scenario's
+own `trials` per arm. A run whose key matches the record adds to it rather than replacing it, so
+running again cannot discard the trials that came out the wrong way. The arms are compared by a
+one-sided Fisher exact test at `ALPHA` per look, over at most `LOOKS` looks — two at 0.025 keep the
+whole under 0.05. The verdict is `holds`, `not-reproduced` (the arm without the sentence never
+failed: the scenario did not produce what the sentence prevents), `undecided` (look again) or
+`does-not-hold`; once one other than `undecided` is reached, the key is not run again. A record
+whose key differs replaces the last one for that scenario and model. The scratch repositories and
+transcripts are deleted once the record is written.
 """
 
 from __future__ import annotations
@@ -42,6 +55,7 @@ import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import comb
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +68,9 @@ ROOT = EVALS.parent
 RESULTS = EVALS / "results"
 SCENARIOS = EVALS / "scenarios"
 ARMS = ("with", "without")
+ALPHA = 0.025
+LOOKS = 2
+VERDICTS = ("holds", "not-reproduced", "undecided", "does-not-hold")
 
 #: The tools a scenario's launch may use without asking. A headless `-p` launch cannot answer a
 #: permission prompt, so anything not named here is refused — which is what keeps a scenario to
@@ -160,6 +177,9 @@ def prepare(root: Path, scenario: Scenario) -> None:
     git(root, "init", "-q", "-b", "main")
     git(root, "config", "user.email", "eval@example.com")
     git(root, "config", "user.name", "eval")
+    # The fixture's files are part of the launch digest, and a conflicted one is written in whatever
+    # style this user's global config names: pinned, so every machine rebuilds the same launch.
+    git(root, "config", "merge.conflictstyle", "merge")
     scenario.fixture(root)
     stub = root / ".evalbin" / "rein"
     stub.parent.mkdir(parents=True, exist_ok=True)
@@ -168,10 +188,96 @@ def prepare(root: Path, scenario: Scenario) -> None:
     (root / ".git" / "info" / "exclude").write_text(".evalbin/\n", encoding="utf-8")
 
 
-def command(prompt: str) -> list[str]:
+def command(prompt: str, model: str) -> list[str]:
     claude = adapters.ADAPTER_TABLE["claude"]
     settings = json.dumps({"permissions": {"allow": list(ALLOWED)}})
-    return [*claude.argv, *claude.config_isolation, *claude.usage_flags, "--settings", settings, prompt]
+    return [
+        *claude.argv,
+        *claude.config_isolation,
+        *claude.usage_flags,
+        "--settings",
+        settings,
+        "--model",
+        model,
+        prompt,
+    ]
+
+
+def stage(scenario: Scenario, arm: str, root: Path, model: str) -> list[str]:
+    """Lay `arm` of the scenario out in the empty directory `root`, and return the command that launches it."""
+    if scenario.carries:
+        # Written before the fixture runs, so whatever the fixture commits already holds it:
+        # nothing in the repository's history says which arm this is.
+        source = (ROOT / scenario.guard.file).read_text(encoding="utf-8")
+        (root / scenario.carries).parent.mkdir(parents=True, exist_ok=True)
+        (root / scenario.carries).write_text(arm_prompt(source, scenario.guard.sentence, arm), encoding="utf-8")
+    prepare(root, scenario)
+    if scenario.carries:
+        prompt = scenario.prompt(root)
+    elif scenario.control is not None:
+        prompt = arm_prompt(scenario.prompt(root), scenario.guard.sentence, "with")
+        prompt = prompt if arm == "with" else scenario.control(root)
+    else:
+        prompt = arm_prompt(scenario.prompt(root), scenario.guard.sentence, arm)
+    return command(prompt, model)
+
+
+def launch_digest(root: Path, argv: Sequence[str]) -> str:
+    """The command and every file of the repository it is launched in, with `root` itself taken out.
+
+    Every trial gets a new scratch directory, and the prompt and the files name paths in it: a
+    digest that moved with it would call the same launch a different one. `.git` is left out — its
+    object ids carry commit times — and the history is the fixture's, which the scenario digest holds.
+    """
+    hashed = hashlib.sha256(json.dumps(list(argv)).replace(str(root), "<root>").encode("utf-8"))
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith((".git/", ".evalbin/")):
+            continue
+        hashed.update(b"\0" + rel.encode("utf-8") + b"\0")
+        hashed.update(path.read_bytes().replace(str(root).encode("utf-8"), b"<root>"))
+    return "sha256:" + hashed.hexdigest()
+
+
+def scenario_digest(name: str) -> str:
+    """The scenario's module and the fixtures it shares: its repository's history and its score."""
+    hashed = hashlib.sha256()
+    for path in (SCENARIOS / f"{name}.py", SCENARIOS / "_fixtures.py"):
+        hashed.update(path.read_bytes() + b"\0")
+    return "sha256:" + hashed.hexdigest()
+
+
+def current_digests(scenario: Scenario, model: str) -> dict[str, str]:
+    """Each arm's launch digest as the sources stand now, without launching anything."""
+    out: dict[str, str] = {}
+    for arm in ARMS:
+        root = Path(tempfile.mkdtemp(prefix=f"rein-eval-{scenario.name}-"))
+        try:
+            out[arm] = launch_digest(root, stage(scenario, arm, root, model))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+    return out
+
+
+def fisher(with_passed: int, without_passed: int, trials: int) -> float:
+    """One-sided Fisher exact p: how likely an arm `with` at least this far ahead, if the sentence did nothing."""
+    passed = with_passed + without_passed
+    total = comb(2 * trials, trials)
+    return (
+        sum(
+            comb(passed, k) * comb(2 * trials - passed, trials - k) for k in range(with_passed, min(passed, trials) + 1)
+        )
+        / total
+    )
+
+
+def judge(with_passed: int, without_passed: int, trials: int, looks: int) -> tuple[float, str]:
+    p = fisher(with_passed, without_passed, trials)
+    if p <= ALPHA:
+        return p, "holds"
+    if without_passed == trials:
+        return p, "not-reproduced"
+    return p, "undecided" if looks < LOOKS else "does-not-hold"
 
 
 @dataclass(frozen=True)
@@ -214,40 +320,23 @@ def _read(rc: int, output: str) -> Launched:
 
 
 def run_arm(
-    scenario: Scenario, arm: str, launch: Callable[[Path, list[str], float], Launched], timeout: float
+    scenario: Scenario, arm: str, launch: Callable[[Path, list[str], float], Launched], timeout: float, model: str
 ) -> tuple[bool, str, tuple[str, ...]]:
-    """One trial of one arm: `(passed, prompt digest, models that answered)`.
+    """One trial of one arm: `(passed, launch digest, models that answered)`.
 
-    The scratch repository is removed whatever happened: a run's record is the count, and a
-    transcript kept past it is a second record nobody reads.
+    The digest is taken before the launch, over what the agent is handed. The scratch repository is
+    removed whatever happened: a run's record is the count, and a transcript kept past it is a
+    second record nobody reads.
     """
     root = Path(tempfile.mkdtemp(prefix=f"rein-eval-{scenario.name}-"))
     try:
-        carried = ""
-        if scenario.carries:
-            # Written before the fixture runs, so whatever the fixture commits already holds it:
-            # nothing in the repository's history says which arm this is.
-            source = (ROOT / scenario.guard.file).read_text(encoding="utf-8")
-            carried = arm_prompt(source, scenario.guard.sentence, arm)
-            (root / scenario.carries).parent.mkdir(parents=True, exist_ok=True)
-            (root / scenario.carries).write_text(carried, encoding="utf-8")
-        prepare(root, scenario)
-        if scenario.carries:
-            prompt = scenario.prompt(root)
-        elif scenario.control is not None:
-            prompt = arm_prompt(scenario.prompt(root), scenario.guard.sentence, "with")
-            prompt = prompt if arm == "with" else scenario.control(root)
-        else:
-            prompt = arm_prompt(scenario.prompt(root), scenario.guard.sentence, arm)
-        launched = launch(root, command(prompt), timeout)
+        argv = stage(scenario, arm, root, model)
+        digest = launch_digest(root, argv)
+        launched = launch(root, argv, timeout)
         if launched.rc != 0:
             raise HarnessError(
                 f"{scenario.name} [{arm}]: the launch failed (rc {launched.rc}):\n{launched.output[-2000:]}"
             )
-        # Over the text with the scratch repository's path taken out: every trial gets a new one, and
-        # a digest that moves with it would call the same prompt a different one.
-        shown = (prompt + "\0" + carried).replace(str(root), "<root>")
-        digest = "sha256:" + hashlib.sha256(shown.encode("utf-8")).hexdigest()
         return scenario.score(root, calls(root)), digest, launched.models
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -257,39 +346,92 @@ def cli_version() -> str:
     return subprocess.run(["claude", "--version"], capture_output=True, text=True, check=True).stdout.strip()
 
 
-def record(scenario: Scenario, *, where: str, cli: str, outcome: dict[str, Any]) -> Path:
-    """Write the run's record, replacing the last one for this scenario and model."""
-    models_seen = sorted({m for arm in ARMS for m in outcome[arm]["models"]})
-    if not models_seen:
-        raise HarnessError("no launch reported which model answered — the run cannot be recorded")
+def record_path(name: str, model: str) -> Path:
+    return RESULTS / f"{name}.{model}.json"
+
+
+def key(scenario: Scenario, *, model: str, cli: str, where: str, digests: dict[str, str]) -> dict[str, Any]:
+    """What a record is about. Two runs with the same key measured the same thing, and add up."""
     if not cli:
         raise HarnessError("the CLI's version is unknown — the run cannot be recorded")
+    return {
+        "model": model,
+        "cli": cli,
+        "where": where,
+        "scenario_digest": scenario_digest(scenario.name),
+        "launch_digests": {arm: digests[arm] for arm in ARMS},
+    }
+
+
+def _key_of(document: dict[str, Any]) -> dict[str, Any]:
+    return {k: document[k] for k in ("model", "cli", "where", "scenario_digest", "launch_digests")}
+
+
+def prior(scenario: Scenario, run_key: dict[str, Any]) -> dict[str, Any] | None:
+    """The record this run adds to, or None when it starts a new one. A decided key is not run again."""
+    path = record_path(scenario.name, run_key["model"])
+    if not path.exists():
+        return None
+    document: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    if _key_of(document) != run_key:
+        return None
+    if document["verdict"] != "undecided":
+        raise HarnessError(
+            f"{scenario.name}: already {document['verdict']} for this launch (evals/results/{path.name}) — "
+            "more trials would be choosing a sample; change the sentence or the scenario to measure again"
+        )
+    return document
+
+
+def record(scenario: Scenario, run_key: dict[str, Any], outcome: dict[str, Any]) -> Path:
+    """Add the run to the record its key names, or start one; write the verdict over every trial."""
+    answered = {m for arm in ARMS for m in outcome[arm]["models"]}
+    if not answered:
+        raise HarnessError("no launch reported which model answered — the run cannot be recorded")
+    if answered != {run_key["model"]}:
+        raise HarnessError(f"asked for {run_key['model']}, answered by {', '.join(sorted(answered))} — not recorded")
+    for arm in ARMS:
+        if outcome[arm]["digest"] != run_key["launch_digests"][arm]:
+            raise HarnessError(f"{scenario.name} [{arm}]: the launch differed from the one this run was keyed on")
+    before = prior(scenario, run_key)
+    runs = [
+        *(before["runs"] if before else []),
+        {
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "trials": scenario.trials,
+            **{arm: outcome[arm]["passed"] for arm in ARMS},
+        },
+    ]
+    trials = sum(r["trials"] for r in runs)
+    passed = {arm: sum(r[arm] for r in runs) for arm in ARMS}
+    p, verdict = judge(passed["with"], passed["without"], trials, len(runs))
     document = {
         "scenario": scenario.name,
         "guard": {"file": scenario.guard.file, "section": scenario.guard.section, "cr": scenario.guard.cr},
-        "models": models_seen,
-        "cli": cli,
-        "where": where,
-        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "trials": scenario.trials,
-        "arms": {arm: {"passed": outcome[arm]["passed"], "prompt_digest": outcome[arm]["digest"]} for arm in ARMS},
+        **run_key,
+        "runs": runs,
+        "trials": trials,
+        "passed": passed,
+        "p": round(p, 4),
+        "verdict": verdict,
     }
+    path = record_path(scenario.name, run_key["model"])
     RESULTS.mkdir(parents=True, exist_ok=True)
-    path = RESULTS / f"{scenario.name}.{'+'.join(models_seen)}.json"
     path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return path
 
 
 def evaluate(
-    scenario: Scenario, launch: Callable[[Path, list[str], float], Launched], *, trials: int, timeout: float
+    scenario: Scenario, launch: Callable[[Path, list[str], float], Launched], *, model: str, timeout: float
 ) -> dict[str, Any]:
     outcome: dict[str, Any] = {}
+    trials = scenario.trials
     for arm in ARMS:
         passed = 0
         digests: set[str] = set()
         seen: set[str] = set()
         for trial in range(trials):
-            ok, digest, answered = run_arm(scenario, arm, launch, timeout)
+            ok, digest, answered = run_arm(scenario, arm, launch, timeout, model)
             passed += int(ok)
             digests.add(digest)
             seen.update(answered)
@@ -314,7 +456,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     where = parser.add_mutually_exclusive_group(required=True)
     where.add_argument("--profile", help="launch inside this `kind: oci-agent` profile of .rein/config.yaml")
     where.add_argument("--host", action="store_true", help="launch on this machine, with this user's CLI login")
-    parser.add_argument("--trials", type=int, default=0, help="trials per arm (default: the scenario's own)")
+    parser.add_argument("--model", required=True, help="the model the CLI is asked for, and recorded under")
     parser.add_argument("--timeout", type=float, default=900.0, help="seconds one launch may run")
     args = parser.parse_args(argv)
     try:
@@ -323,12 +465,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         cli = cli_version()
         for name in args.scenarios or names():
             scenario = load(name)
-            trials = args.trials or scenario.trials
-            outcome = evaluate(scenario, launch, trials=trials, timeout=args.timeout)
-            scenario = Scenario(**{**scenario.__dict__, "trials": trials})
-            path = record(scenario, where=place, cli=cli, outcome=outcome)
-            counts = ", ".join(f"{arm} {outcome[arm]['passed']}/{trials}" for arm in ARMS)
-            print(f"{name}: {counts} → {path.relative_to(ROOT)}")
+            run_key = key(
+                scenario, model=args.model, cli=cli, where=place, digests=current_digests(scenario, args.model)
+            )
+            prior(scenario, run_key)  # refuses a decided key before anything is launched
+            outcome = evaluate(scenario, launch, model=args.model, timeout=args.timeout)
+            path = record(scenario, run_key, outcome)
+            document = json.loads(path.read_text(encoding="utf-8"))
+            counts = ", ".join(f"{arm} {document['passed'][arm]}/{document['trials']}" for arm in ARMS)
+            print(f"{name}: {counts}, p {document['p']}: {document['verdict']} → {path.relative_to(ROOT)}")
     except (HarnessError, executors.ExecutorError, subprocess.SubprocessError) as exc:
         print(f"eval: {exc}", file=sys.stderr)
         return 1

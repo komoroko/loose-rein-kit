@@ -1,0 +1,31 @@
+{
+  "scenario": "repair_at_cause",
+  "guard": {
+    "file": "src/rein/build_prompts.py",
+    "section": "gate_four_fix_prompt",
+    "cr": "CR-97"
+  },
+  "model": "claude-opus-5-5",
+  "cli": "2.1.314 (Claude Code)",
+  "where": "host",
+  "scenario_digest": "sha256:f2eab12e89152cfd779c109d49f6ae87c41ccf38e7083efdb1097c8e138882c9",
+  "launch_digests": {
+    "with": "sha256:0a34f5e4dfae122fc40822571add62f21f6627c361af507705044baf14d5e18c",
+    "without": "sha256:bc33c720f8f18be1062f57578f7fb4af6537d19d9114f64b32ef1c5bd26a3b1a"
+  },
+  "runs": [
+    {
+      "at": "2026-10-30T03:34:07+00:00",
+      "trials": 5,
+      "with": 5,
+      "without": 0
+    }
+  ],
+  "trials": 5,
+  "passed": {
+    "with": 5,
+    "without": 0
+  },
+  "p": 0.004,
+  "verdict": "holds"
+}

@@ -63,20 +63,35 @@ Thirteen change requests (CR-81 to CR-93).
   typing. Conversation stays in the person's language, and what the code prints stays English. **A
   repository that wrote its documents in another language reads `en` once it upgrades**: set
   `project.language: ja` (or its tag) in `config.yaml`.
-- **The sentences rein hands an agent are tested against a control (CR-88, CR-89).** `evals/` holds
-  behaviour tests: each scenario builds a repository, hands a real agent CLI the prompt rein would,
-  and reads what the launch left — the `rein` calls a stub on PATH records, the files, the findings
-  file — never a model's opinion of it. It runs in two arms, with and without the one sentence it
-  guards, and records both counts under `evals/results/` per scenario and model; there is no pass
-  mark. `make eval EVAL_WHERE="--host"` (or `--profile <oci-agent profile>`) runs them; they are not
-  part of `check` or CI. `evals/inventory.yaml` classifies every section of the prompts, the rules and
-  `build_prompts.py` as `code`, `unverified` or `scenario:<name>`, and `template_lint` refuses a
-  section nobody classified, an entry for a section that is gone, and a scenario filed under a section
-  it does not guard. Three scenarios to start: an implementer whose criterion needs a path outside its
-  scope says so first, a reviewer of a sound change writes an empty list, and a confirming reader
-  closes a correct fix. A fourth, an implementer facing an open choice records it and goes on, passed
-  as often without its sentence as with it, and again once the choice reached into another task; the
-  sentence is gone from `implementer.md`, and the example command and `--undo` carry the behaviour.
+- **The sentences rein hands an agent are tested against a control (CR-88, CR-89, CR-94 to CR-97).**
+  `evals/` holds behaviour tests: each scenario builds a repository, hands a real agent CLI the prompt
+  rein would, and reads what the launch left — the `rein` calls a stub on PATH records, the files, the
+  findings file — never a model's opinion of it. It runs in two arms, with and without the one sentence
+  it guards. `make eval EVAL_WHERE="--host" EVAL_MODEL=<model>` (or `--profile <oci-agent profile>`)
+  runs them; they are not part of `check` or CI.
+  **A record is about the launch it measured.** Its key is each arm's launch digest (the command, the
+  prompt and every file of the repository handed over), the scenario's digest (its fixture and its
+  score), the model, the CLI's version and where it ran, and `template_lint` rebuilds the launches
+  without running them and refuses a record that no longer matches, or whose scenario is gone.
+  **The arms are judged by a one-sided Fisher exact test**, at 0.025 on each of at most two looks. A
+  run adds the scenario's own five trials per arm to the record of the same key instead of replacing
+  it, `--trials` is gone, and a key with a verdict (`holds`, `not-reproduced`, `does-not-hold`) is not
+  run again: more trials would be choosing a sample.
+  **`evals/inventory.yaml` names what holds each instruction.** A section is `unverified`, `none` (it
+  asks an agent for nothing), or a list of `held` sentences, each `by` a scenario whose every record
+  `holds` or by a unit test (`tests/<file>::<function>`) showing the code refuse the violation, with a
+  `rest` for everything else. A bare `code` is refused; so is a held sentence not in its section once.
+  Four scenarios hold on `claude-opus-5-5`: a reviewer of a sound change writes an empty list (5/5
+  against 1/5), a confirming reader closes a correct fix (5/5 against 0/5), a resolver of two tasks
+  that cannot both hold reports `needs-revision` (4/5 against 0/5), and a repairer fixes the cause
+  rather than the line the finding named (5/5 against 0/5). One does not: an implementer whose
+  criterion needs a path outside its scope says so before doing the work 6/10 times with the sentence
+  and 2/10 without. The failure is real and the sentence prevents too little of it, so the section is
+  `unverified`; the scope itself is still held by the loop, which parks the task after the attempt. A
+  sentence on recording an open choice passed as often without it as with it, and is gone from
+  `implementer.md`.
+  `implementer.md` also said a run that ends without `rein report` is treated as a failed attempt. It
+  is judged on its diff: an empty one fails, any other goes to the gate. The sentence says so now.
 - **What an implementer decides is sorted by what overruling it would move, not by how much it
   matters (CR-90).** `rein decision add --risk` parked the task for a human at `medium` and above, on
   a risk the implementer chose and that no prompt explained. A decision that would move a claim, the

@@ -5,21 +5,27 @@
     "section": "batch_review_prompt",
     "cr": "CR-89"
   },
-  "models": [
-    "claude-opus-5-5"
-  ],
-  "cli": "2.1.312 (Claude Code)",
+  "model": "claude-opus-5-5",
+  "cli": "2.1.314 (Claude Code)",
   "where": "host",
-  "at": "2026-10-29T17:16:59+00:00",
-  "trials": 3,
-  "arms": {
-    "with": {
-      "passed": 3,
-      "prompt_digest": "sha256:57b33eff9e7a2a5b74e75e69db451581c1ea8e6b0ca4686e029dcbe7d08da3d0"
-    },
-    "without": {
-      "passed": 1,
-      "prompt_digest": "sha256:b09744c15900844b011c4b6d42674603875007ff15f1dea7af9cdcaceaf15ec0"
+  "scenario_digest": "sha256:0730f46d9e586d6c52cdaebfe1a0bcf098f0c1e4580158d0b9096b84ef58aede",
+  "launch_digests": {
+    "with": "sha256:3512330274683891ba76544226859aacbc834ef90e57392ad850f669b243ab59",
+    "without": "sha256:f74ee3e4987670f86feb776c6d0f90f139c0d5a4f355d9b042cef5c43870c182"
+  },
+  "runs": [
+    {
+      "at": "2026-10-30T03:26:38+00:00",
+      "trials": 5,
+      "with": 5,
+      "without": 1
     }
-  }
+  ],
+  "trials": 5,
+  "passed": {
+    "with": 5,
+    "without": 1
+  },
+  "p": 0.0238,
+  "verdict": "holds"
 }

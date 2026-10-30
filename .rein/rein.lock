@@ -10,7 +10,7 @@ prompts:
     AGENTS.rein.md: sha256:57e1fbcfd0dedc3e038de5028f23fe3ac3c923a2d42fd14a13e5404fa5342033
     prompts/agents/adversarial-reviewer.md: sha256:5730bf8d24be3041f27be5ab4745010811e970c46dedd0c95451452db0dd9188
     prompts/agents/architect.md: sha256:3e1989a2702bc56d377f659d99cbf523930070f8398634441a4a550f29373688
-    prompts/agents/implementer.md: sha256:8d9c6af087aeff0ad4e9afeec2b8c7d2b5e784c2189af1ec67b291c38d346301
+    prompts/agents/implementer.md: sha256:398ce65a815c02ec7ed3fbdee67343c6ee4627f155a9fe68ff4b8cda990e19ac
     prompts/agents/requirements-analyst.md: sha256:65c5b0d45cb14dc23631172022cc21e9433970b2a9de4aafe7f3727a25f520ad
     prompts/commands/build.md: sha256:1cfcf9038a602c9b18fc85ff8e330f5014b4c3a18d8c055d36fba5cdd2c8b5b9
     prompts/commands/design.md: sha256:f7aee2830c0b65fa3c1cbc6400fe1ce31ac844b81303c765a654c213ae80702f

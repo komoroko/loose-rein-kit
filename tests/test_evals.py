@@ -37,35 +37,91 @@ def test_a_sentence_not_in_the_prompt_exactly_once_leaves_no_control(prompt: str
         harness.arm_prompt(prompt, "twice. ", "without")
 
 
-@pytest.mark.parametrize(("models", "cli", "says"), [((), "2.1", "which model"), (("claude-x",), "", "version")])
-def test_a_run_that_cannot_be_attributed_is_not_recorded(
+def _key(scenario: harness.Scenario, model: str = "m", cli: str = "2.1") -> dict[str, object]:
+    return harness.key(
+        scenario, model=model, cli=cli, where="host", digests={"with": "sha256:a", "without": "sha256:b"}
+    )
+
+
+def _outcome(with_: int, without: int, models: tuple[str, ...] = ("m",)) -> dict[str, object]:
+    return {
+        "with": {"passed": with_, "digest": "sha256:a", "models": list(models)},
+        "without": {"passed": without, "digest": "sha256:b", "models": list(models)},
+    }
+
+
+@pytest.mark.parametrize(("models", "cli", "says"), [((), "2.1", "which model"), (("other",), "2.1", "answered by")])
+def test_a_run_that_cannot_be_attributed_to_the_model_asked_for_is_not_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, models: tuple[str, ...], cli: str, says: str
 ) -> None:
     monkeypatch.setattr(harness, "RESULTS", tmp_path / "results")
-    outcome = {arm: {"passed": 1, "digest": "sha256:x", "models": list(models)} for arm in harness.ARMS}
+    scenario = harness.load("review_empty")
     with pytest.raises(harness.HarnessError, match=says):
-        harness.record(harness.load("review_empty"), where="host", cli=cli, outcome=outcome)
+        harness.record(scenario, _key(scenario, cli=cli), _outcome(1, 1, models))
     assert not (tmp_path / "results").exists()
 
 
-def test_a_record_holds_both_arms_and_replaces_the_last_for_its_model(
+def test_an_unknown_cli_version_keys_nothing() -> None:
+    with pytest.raises(harness.HarnessError, match="version"):
+        _key(harness.load("review_empty"), cli="")
+
+
+@pytest.mark.parametrize(
+    ("with_", "without", "trials", "looks", "verdict"),
+    [
+        (5, 1, 5, 1, "holds"),
+        (4, 0, 5, 1, "holds"),
+        (5, 2, 5, 1, "undecided"),
+        (5, 5, 5, 1, "not-reproduced"),
+        (3, 3, 5, 1, "undecided"),
+        (10, 5, 10, 2, "holds"),
+        (9, 4, 10, 2, "does-not-hold"),
+        (10, 10, 10, 2, "not-reproduced"),
+        (3, 0, 3, 1, "undecided"),
+    ],
+)
+def test_the_arms_are_judged_by_a_one_sided_exact_test_at_the_alpha_of_each_look(
+    with_: int, without: int, trials: int, looks: int, verdict: str
+) -> None:
+    """3/3 against 0/3 — the first run's best — has p 0.05: it is not a difference two looks can afford."""
+    assert harness.judge(with_, without, trials, looks)[1] == verdict
+
+
+def test_a_second_run_of_the_same_launch_adds_its_trials_and_a_decided_one_is_not_run_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(harness, "RESULTS", tmp_path / "results")
     scenario = harness.load("review_empty")
-    outcome = {
-        "with": {"passed": 5, "digest": "sha256:a", "models": ["m"]},
-        "without": {"passed": 2, "digest": "sha256:b", "models": ["m"]},
-    }
-    first = harness.record(scenario, where="host", cli="2.1", outcome=outcome)
-    second = harness.record(scenario, where="host", cli="2.2", outcome=outcome)
+    run_key = _key(scenario)
+    first = harness.record(scenario, run_key, _outcome(5, 2))
+    assert json.loads(first.read_text(encoding="utf-8"))["verdict"] == "undecided"
+    second = harness.record(scenario, run_key, _outcome(5, 2))
+    document = json.loads(second.read_text(encoding="utf-8"))
     assert first == second and list((tmp_path / "results").iterdir()) == [first]
-    document = json.loads(first.read_text(encoding="utf-8"))
-    assert document["arms"] == {
-        "with": {"passed": 5, "prompt_digest": "sha256:a"},
-        "without": {"passed": 2, "prompt_digest": "sha256:b"},
-    }
-    assert document["cli"] == "2.2" and document["models"] == ["m"] and document["guard"]["cr"] == "CR-89"
+    assert document["trials"] == 10 and document["passed"] == {"with": 10, "without": 4}
+    assert document["verdict"] == "holds" and len(document["runs"]) == 2
+    with pytest.raises(harness.HarnessError, match="already holds"):
+        harness.prior(scenario, run_key)
+
+
+def test_a_run_of_a_different_launch_replaces_the_record_rather_than_adding_to_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(harness, "RESULTS", tmp_path / "results")
+    scenario = harness.load("review_empty")
+    harness.record(scenario, _key(scenario, cli="2.1"), _outcome(5, 2))
+    path = harness.record(scenario, _key(scenario, cli="2.2"), _outcome(5, 0))
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["cli"] == "2.2" and document["trials"] == 5 and document["verdict"] == "holds"
+
+
+def test_a_run_whose_launch_moved_under_it_is_not_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(harness, "RESULTS", tmp_path / "results")
+    scenario = harness.load("review_empty")
+    outcome = _outcome(5, 0)
+    outcome["with"]["digest"] = "sha256:z"  # type: ignore[index]
+    with pytest.raises(harness.HarnessError, match="differed"):
+        harness.record(scenario, _key(scenario), outcome)
 
 
 @pytest.mark.parametrize("name", harness.names())
@@ -94,8 +150,22 @@ def test_two_trials_of_one_arm_carry_the_same_prompt_digest(name: str) -> None:
         return harness.Launched(rc=0, output="", models=("m",))
 
     for arm in harness.ARMS:
-        digests = {harness.run_arm(scenario, arm, launch, 1.0)[1] for _ in range(2)}
-        assert len(digests) == 1, arm
+        digests = {harness.run_arm(scenario, arm, launch, 1.0, "m")[1] for _ in range(2)}
+        assert digests == {harness.current_digests(scenario, "m")[arm]}, arm
+
+
+def test_the_launch_digest_moves_with_the_guarded_file_the_fixture_and_the_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a record is about: change any of these and the record no longer speaks for the launch."""
+    scenario = harness.load("scope_needs_revision")
+    before = harness.current_digests(scenario, "m")
+    assert harness.current_digests(scenario, "n") != before
+    copy = tmp_path / "src" / "rein" / "data" / "prompts" / "agents" / "implementer.md"
+    copy.parent.mkdir(parents=True)
+    copy.write_text((_ROOT / scenario.guard.file).read_text(encoding="utf-8") + "\nOne more line.\n", encoding="utf-8")
+    monkeypatch.setattr(harness, "ROOT", tmp_path)
+    assert harness.current_digests(scenario, "m") != before
 
 
 def _scope_root(tmp_path: Path) -> Path:
@@ -133,44 +203,191 @@ def test_the_fix_is_confirmed_when_nothing_goes_back_whichever_arm_answered(
     assert harness.load("confirm_fix").score(tmp_path, []) is lands
 
 
+@pytest.mark.parametrize(
+    ("said", "passes"),
+    [
+        ([["report", "--outcome", "needs-revision", "--summary", "5 s cap vs 90 s upload"]], True),
+        ([["report", "--outcome", "implemented", "--summary", "kept 90"]], False),
+        ([["report", "--outcome", "implemented"], ["report", "--outcome", "needs-revision"]], False),
+        ([], False),
+    ],
+)
+def test_a_contradiction_passes_only_when_it_was_reported_and_nothing_else_was(
+    said: list[list[str]], passes: bool
+) -> None:
+    assert harness.load("conflict_contradiction").score(Path("."), said) is passes
+
+
+def test_the_conflict_fixture_leaves_the_merge_conflicted(tmp_path: Path) -> None:
+    harness.prepare(tmp_path, harness.load("conflict_contradiction"))
+    assert "<<<<<<<" in (tmp_path / "src" / "client.py").read_text(encoding="utf-8")
+
+
+def test_a_repair_passes_at_the_cause_and_not_at_the_line_the_finding_named(tmp_path: Path) -> None:
+    from evals.scenarios import repair_at_cause
+
+    scenario = harness.load("repair_at_cause")
+    harness.prepare(tmp_path, scenario)
+    report = tmp_path / "src" / "report.py"
+    report.write_text(repair_at_cause.REPORT.replace("to_seconds(ms)", "to_seconds(ms) / 10"), encoding="utf-8")
+    assert scenario.score(tmp_path, []) is False, "describe is right now, and timer.py is still wrong"
+    report.write_text(repair_at_cause.REPORT, encoding="utf-8")
+    (tmp_path / "src" / "units.py").write_text(repair_at_cause.UNITS.replace("/ 100", "/ 1000"), encoding="utf-8")
+    assert scenario.score(tmp_path, []) is True
+
+
 # --- the inventory ---------------------------------------------------------------------
 
 
-_SECTIONS = {"a.md": ["How to proceed", "Output"], "build_prompts.py": ["x_prompt"]}
-_GUARDS = {"s1": ("a.md", "How to proceed")}
+_SECTIONS = {
+    "a.md": {"How to proceed": "Read it. Stop before you touch another path. Then build.", "Output": "A table."},
+    "build_prompts.py": {"x_prompt": "Fix it."},
+}
+_GUARDS = {"s1": ("a.md", "How to proceed", "Stop before you touch another path.")}
+_STOP = {"sentence": "Stop before you touch another path.", "by": "scenario:s1"}
 
 
-def test_the_live_inventory_and_guards_hold() -> None:
+def _check(inventory: object, verdicts: dict[str, list[str]] | None = None, tests: tuple[str, ...] = ()) -> list[str]:
+    held = {"s1": ["holds"]} if verdicts is None else verdicts
+    failures: list[str] = template_lint.check_eval_inventory(
+        _SECTIONS, inventory, _GUARDS, held, lambda by: by in tests
+    )
+    return failures
+
+
+def test_the_live_inventory_guards_and_records_hold() -> None:
     sections = template_lint.prompt_sections(_ROOT)
     guards = template_lint.eval_guards(_ROOT)
+    verdicts, stale = template_lint.eval_records(_ROOT)
     from rein import strict_yaml
 
     inventory = strict_yaml.load_mapping((_ROOT / "evals" / "inventory.yaml").read_text(encoding="utf-8"), what="i")
     assert template_lint.check_eval_guards(sections, guards) == []
-    assert template_lint.check_eval_inventory(sections, inventory, guards) == []
+    assert stale == []
+    assert (
+        template_lint.check_eval_inventory(
+            sections, inventory, guards, verdicts, lambda by: template_lint._test_exists(_ROOT, by)
+        )
+        == []
+    )
 
 
 def test_a_section_nobody_classified_and_one_that_no_longer_exists_are_both_refused() -> None:
-    inventory = {
-        "a.md": {"How to proceed": "scenario:s1", "Gone": "unverified"},
-        "build_prompts.py": {"x_prompt": "code"},
-    }
-    failures = template_lint.check_eval_inventory(_SECTIONS, inventory, _GUARDS)
+    failures = _check(
+        {"a.md": {"How to proceed": "unverified", "Gone": "unverified"}, "build_prompts.py": {"x_prompt": "none"}}
+    )
     assert any('"Output" is not classified' in f for f in failures)
     assert any('"Gone" names a section that does not exist' in f for f in failures)
 
 
-def test_a_scenario_filed_under_a_section_it_does_not_guard_is_refused() -> None:
-    inventory = {
-        "a.md": {"How to proceed": "unverified", "Output": "scenario:s1"},
-        "build_prompts.py": {"x_prompt": "code"},
-    }
-    assert template_lint.check_eval_inventory(_SECTIONS, inventory, _GUARDS) == [
-        "evals/inventory.yaml: a.md \"Output\": scenario 's1' does not guard this section"
+def test_a_bare_code_says_nothing_about_what_holds_it_and_is_refused() -> None:
+    inventory = {"a.md": {"How to proceed": "code", "Output": "none"}, "build_prompts.py": {"x_prompt": "unverified"}}
+    assert any("'code' is not one of unverified, none" in f for f in _check(inventory))
+
+
+def test_a_held_sentence_names_a_scenario_that_holds_or_a_test_that_exists() -> None:
+    def inventory(by: str) -> dict[str, object]:
+        held = {"held": [{"sentence": "Stop before you touch another path.", "by": by}], "rest": "unverified"}
+        return {"a.md": {"How to proceed": held, "Output": "none"}, "build_prompts.py": {"x_prompt": "unverified"}}
+
+    assert _check(inventory("scenario:s1")) == []
+    assert _check(inventory("tests/test_a.py::test_stop"), tests=("tests/test_a.py::test_stop",)) == []
+    assert any("neither" in f for f in _check(inventory("tests/test_a.py::test_gone")))
+    assert any("does not hold (undecided)" in f for f in _check(inventory("scenario:s1"), {"s1": ["undecided"]}))
+    assert any("no record that matches" in f for f in _check(inventory("scenario:s1"), {}))
+
+
+def test_a_held_sentence_that_is_not_in_its_section_once_is_refused() -> None:
+    gone = {"held": [{"sentence": "Never stop.", "by": "tests/t.py::test_x"}], "rest": "none"}
+    inventory = {"a.md": {"How to proceed": gone, "Output": "none"}, "build_prompts.py": {"x_prompt": "unverified"}}
+    assert any("occurs 0 time(s)" in f for f in _check(inventory, tests=("tests/t.py::test_x",)))
+
+
+def test_a_scenario_filed_under_a_sentence_it_does_not_guard_is_refused() -> None:
+    other = {"held": [{"sentence": "A table.", "by": "scenario:s1"}], "rest": "none"}
+    inventory = {"a.md": {"How to proceed": "unverified", "Output": other}, "build_prompts.py": {"x_prompt": "none"}}
+    assert _check(inventory) == [
+        "evals/inventory.yaml: a.md \"Output\" 'A table.'…: scenario 's1' does not guard this sentence"
     ]
 
 
-def test_a_scenario_whose_section_was_renamed_is_refused() -> None:
-    assert template_lint.check_eval_guards(_SECTIONS, {"s1": ("a.md", "How we proceed")}) == [
+def test_a_scenario_whose_section_was_renamed_or_whose_sentence_moved_out_is_refused() -> None:
+    assert template_lint.check_eval_guards(_SECTIONS, {"s1": ("a.md", "How we proceed", "x")}) == [
         'evals/scenarios/s1.py guards a.md "How we proceed", which does not exist'
     ]
+    assert template_lint.check_eval_guards(_SECTIONS, {"s1": ("a.md", "Output", "Stop.")}) == [
+        'evals/scenarios/s1.py guards a sentence a.md "Output" does not hold once'
+    ]
+
+
+def test_a_section_is_read_whitespace_folded_and_a_prompt_function_by_its_literals(tmp_path: Path) -> None:
+    (tmp_path / "src" / "rein" / "data" / "prompts").mkdir(parents=True)
+    (tmp_path / "src" / "rein" / "data" / "prompts" / "x.md").write_text(
+        "# X\n\n## One\nwrapped\n  line\n", encoding="utf-8"
+    )
+    (tmp_path / "src" / "rein" / "data" / "rules").mkdir(parents=True)
+    (tmp_path / "src" / "rein" / "data" / "rules" / "AGENTS.md").write_text("no heading\n", encoding="utf-8")
+    (tmp_path / "src" / "rein" / "build_prompts.py").write_text(
+        'def a_prompt(n):\n    """Doc."""\n    return (f"one {n} "\n        "two")\n', encoding="utf-8"
+    )
+    sections = template_lint.prompt_sections(tmp_path)
+    assert sections["src/rein/data/prompts/x.md"] == {"One": "wrapped line"}
+    assert sections["src/rein/data/rules/AGENTS.md"] == {"(whole)": "no heading"}
+    assert sections["src/rein/build_prompts.py"] == {"a_prompt": "one two"}
+
+
+# --- the records -----------------------------------------------------------------------
+
+
+def _live_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **change: object) -> list[str]:
+    monkeypatch.setattr(harness, "RESULTS", tmp_path)
+    scenario = harness.load("review_empty")
+    digests = harness.current_digests(scenario, "m")
+    run_key = harness.key(scenario, model="m", cli="2.1", where="host", digests=digests)
+    outcome = {
+        arm: {"passed": 5 if arm == "with" else 0, "digest": digests[arm], "models": ["m"]} for arm in harness.ARMS
+    }
+    path = harness.record(scenario, run_key, outcome)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document.update(change)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    verdicts, failures = template_lint.eval_records(_ROOT)
+    assert not failures or verdicts == {}
+    refused: list[str] = failures
+    return refused
+
+
+def test_a_record_of_the_launch_as_it_ships_is_read_for_its_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _live_record(tmp_path, monkeypatch) == []
+    assert template_lint.eval_records(_ROOT)[0] == {"review_empty": ["holds"]}
+
+
+@pytest.mark.parametrize(
+    ("change", "says"),
+    [
+        ({"launch_digests": {"with": "sha256:old", "without": "sha256:old"}}, "hands the agent changed"),
+        ({"scenario_digest": "sha256:old"}, "or its fixtures changed"),
+        ({"scenario": "local_decision"}, "no longer exists"),
+    ],
+)
+def test_a_record_of_a_launch_that_no_longer_ships_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: dict[str, object], says: str
+) -> None:
+    """The record `scope_needs_revision` carried into 0.16.0 measured an implementer.md that a later
+    edit in the same change had moved, and nothing said so."""
+    failures = _live_record(tmp_path, monkeypatch, **change)
+    assert len(failures) == 1 and says in failures[0]
+
+
+def test_a_conflicted_fixture_rebuilds_the_same_launch_whatever_conflict_style_the_user_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The conflicted file is part of the launch digest, and git writes it in the global style."""
+    scenario = harness.load("conflict_contradiction")
+    before = harness.current_digests(scenario, "m")
+    config = tmp_path / "gitconfig"
+    config.write_text("[merge]\n\tconflictstyle = zdiff3\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    assert harness.current_digests(scenario, "m") == before

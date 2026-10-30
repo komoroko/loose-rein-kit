@@ -77,14 +77,15 @@ audit:
 	uv export --frozen --format requirements-txt --no-emit-project -o "$$req" && uvx pip-audit -r "$$req"; \
 	status=$$?; rm -f "$$req"; exit $$status
 
-# Behaviour tests of the sentences rein hands an agent (devr 論点 Q): each scenario launches a real
-# agent CLI in two arms, with and without the sentence it guards, and records the two counts under
-# evals/results/. Not part of `check` or CI: it spends real launches. Say where they run —
-# EVAL_WHERE="--host", or EVAL_WHERE="--profile <oci-agent profile>" — and, optionally, which
-# scenarios (EVAL_SCENARIOS="review_empty") and how many trials per arm (EVAL_TRIALS=5).
+# Behaviour tests of the sentences rein hands an agent (devr 論点 Q, 論点 T): each scenario launches a
+# real agent CLI in two arms, with and without the sentence it guards, and adds the two counts to its
+# record under evals/results/. Not part of `check` or CI: it spends real launches. Say where they run
+# — EVAL_WHERE="--host", or EVAL_WHERE="--profile <oci-agent profile>" — which model answers
+# (EVAL_MODEL=claude-opus-5-5), and, optionally, which scenarios (EVAL_SCENARIOS="review_empty").
 eval:
 	@if [ -z "$(EVAL_WHERE)" ]; then echo 'eval: say where the agents run — EVAL_WHERE="--host" or EVAL_WHERE="--profile <name>"'; exit 2; fi
-	uv run --frozen python -m evals.harness $(EVAL_WHERE) $(if $(EVAL_TRIALS),--trials $(EVAL_TRIALS)) $(EVAL_SCENARIOS)
+	@if [ -z "$(EVAL_MODEL)" ]; then echo 'eval: say which model answers — EVAL_MODEL=<model id>'; exit 2; fi
+	uv run --frozen python -m evals.harness $(EVAL_WHERE) --model $(EVAL_MODEL) $(EVAL_SCENARIOS)
 
 # Cleanup
 clean:

@@ -25,8 +25,9 @@ outside the loop, which is what keeps statuses, merges and the audit chain machi
 ## Completion/escalation — always end with `rein report`
 
 **Every attempt ends with exactly one `rein report` call.** It is the only channel by which
-anything you say reaches the caller: your prose output is not read, and a run that ends without a
-report is treated as a failed attempt rather than a silent success.
+anything you say reaches the caller: your prose output is not read. A run that ends without one is
+judged on its diff alone: an empty diff is a failed attempt, a non-empty one goes to the quality gate,
+and a `blocked` or `needs-revision` you meant to raise was never said.
 
 ```sh
 rein report --outcome implemented --summary "what you built, in a sentence or two" \

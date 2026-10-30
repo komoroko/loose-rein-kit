@@ -1,12 +1,16 @@
-# How each section of what rein hands an agent is held to account (devr 論点 Q).
+# What rein hands an agent, section by section, and what holds each instruction in it (devr 論点 Q, 論点 U).
 #
-# `code`: a mechanism enforces what the section says, whatever an agent makes of it.
-# `scenario:<name>`: a behaviour test in evals/scenarios/ holds a sentence of it, against a control.
-# `unverified`: neither. The section is a claim nothing has tested.
+# A section is one of:
+#   `unverified`  it asks an agent for something nothing checks.
+#   `none`        it asks an agent for nothing: it describes the machine.
+#   a mapping     `held`: the sentences that are checked, each with `by` — `scenario:<name>`, a behaviour
+#                 test whose every record matches what ships and `holds` (devr 論点 T), or
+#                 `tests/<file>::<function>`, a unit test showing the code refuse or catch the violation;
+#                 and `rest`: `unverified` or `none`, for whatever else the section asks.
 #
-# `template_lint` refuses a section missing from here, an entry for a section that no longer exists,
-# and a `scenario:` entry whose scenario does not guard that section. Updated with every change
-# request that touches a prompt.
+# A `code` with nothing named is the writer's account and is refused. `template_lint` refuses a section
+# missing from here, an entry for a section that no longer exists, a held sentence not in its section
+# exactly once, and a `by` that does not hold it. Updated with every change request that touches a prompt.
 
 src/rein/data/prompts/agents/adversarial-reviewer.md:
   "Role": unverified
@@ -23,17 +27,33 @@ src/rein/data/prompts/agents/architect.md:
   "If the product is an AI agent application (optional lens)": unverified
   "Output": unverified
 src/rein/data/prompts/agents/implementer.md:
-  "How to proceed": scenario:scope_needs_revision
-  "Completion/escalation — always end with `rein report`": unverified
+  "How to proceed":
+    held:
+      - sentence: "**Do not exceed scope**"
+        by: tests/test_e2e_evidence.py::test_a_change_outside_the_tasks_declared_scope_blocks_it
+    rest: unverified
+  "Completion/escalation — always end with `rein report`":
+    held:
+      - sentence: "an empty diff is a failed attempt"
+        by: tests/test_e2e_evidence.py::test_an_implementer_that_changes_nothing_does_not_finish_the_task
+    rest: unverified
   "Decisions the ticket does not settle": unverified
 src/rein/data/prompts/agents/requirements-analyst.md:
   "Role": unverified
   "How to proceed": unverified
   "Output": unverified
 src/rein/data/prompts/commands/build.md:
-  "Prerequisite check (always first)": unverified
+  "Prerequisite check (always first)":
+    held:
+      - sentence: "If it is pending, do not work"
+        by: tests/test_build_loop.py::test_the_loop_refuses_while_gate_three_is_pending
+    rest: unverified
   "The consumption algorithm": unverified
-  "Running it — `rein build`": unverified
+  "Running it — `rein build`":
+    held:
+      - sentence: "Commit or stash first."
+        by: tests/test_build_loop.py::test_a_dirty_tree_stops_the_run_before_a_task_is_touched
+    rest: unverified
   "Quality-gate step notes": unverified
   "When all tasks complete": unverified
 src/rein/data/prompts/commands/design.md:
@@ -72,16 +92,30 @@ src/rein/data/prompts/rules/gate-workflow.md:
   "The human review before acceptance": unverified
   "Context budget (context hygiene)": unverified
   "Cycles, scope changes, hotfixes": unverified
-  "Enforcement detail (the gate rules' mechanism layer)": unverified
-  "The gates a cycle has": unverified
-  "Repo map": unverified
+  "Enforcement detail (the gate rules' mechanism layer)": none
+  "The gates a cycle has": none
+  "Repo map": none
 src/rein/data/rules/AGENTS.md:
   "Capability vocabulary (portable verbs)": unverified
   "Language": unverified
   "Development lifecycle": unverified
-  "Single Source of Truth (SSOT)": unverified
-  "Gate rules (strict)": unverified
-  "How many gates a cycle has": unverified
+  "Single Source of Truth (SSOT)":
+    held:
+      - sentence: "never edit it, and never run `apply` for them"
+        by: tests/test_reviews.py::test_a_shell_write_of_reviews_yaml_is_run_on_by_nothing_until_it_is_restored
+    rest: unverified
+  "Gate rules (strict)":
+    held:
+      - sentence: "Do not change the product without an approved mandate that covers the path."
+        by: tests/test_gate_guard.py::test_a_guarded_path_waits_for_a_mandate
+      - sentence: "Never edit a gate line yourself"
+        by: tests/test_gate_guard.py::test_an_edit_that_would_approve_a_gate_names_the_reason
+      - sentence: "never pre-authorize it."
+        by: tests/test_doctor.py::test_pre_authorizing_approve_is_a_fail
+      - sentence: "Do not widen the mandate to fit the work."
+        by: tests/test_gate_guard.py::test_a_path_outside_the_mandates_scope_is_denied_even_with_it_approved
+    rest: unverified
+  "How many gates a cycle has": none
   "Roll back (returning upstream)": unverified
   "Task dependency graph": unverified
   "Principles": unverified
@@ -89,10 +123,28 @@ src/rein/data/rules/AGENTS.md:
   "Branch / commit / permissions": unverified
 src/rein/build_prompts.py:
   "implementer_prompt": unverified
-  "batch_review_prompt": scenario:review_empty
-  "confirm_prompt": scenario:confirm_fix
-  "gate_four_fix_prompt": unverified
+  "batch_review_prompt":
+    held:
+      - sentence: "An empty list is a real answer, and the right one when the change is sound: inventing a finding to look thorough costs an implementer round for nothing."
+        by: scenario:review_empty
+    rest: unverified
+  "confirm_prompt":
+    held:
+      - sentence: "What you notice anywhere else goes under `outside`: it is not this fix's question, and it is carried to acceptance rather than dropped."
+        by: scenario:confirm_fix
+    rest: unverified
+  "gate_four_fix_prompt":
+    held:
+      - sentence: "Repair each at its cause. The line a finding names is where the defect showed; find where it comes from and fix it there, even when that is in code another task of this plan wrote — the approved mandate covers it. "
+        by: scenario:repair_at_cause
+      - sentence: "**Every repair comes with a test that fails against the code as it was and passes with your fix.**"
+        by: tests/test_build_loop.py::test_a_repair_whose_tests_pass_without_it_is_refused_as_a_fix_of_the_symptom
+    rest: unverified
   "integration_review_fix_prompt": unverified
   "integration_fix_prompt": unverified
-  "conflict_prompt": unverified
+  "conflict_prompt":
+    held:
+      - sentence: "If the two sides genuinely contradict each other — they cannot both hold, so any resolution\nwould have to drop or reinterpret one of them — **do not invent a merge**. Run\n`rein report --outcome needs-revision --summary <which two intentions collide and why>`. That is a defect in the plan, and papering over it here is exactly what must not happen. "
+        by: scenario:conflict_contradiction
+    rest: unverified
   "integration_review_prompt": unverified
