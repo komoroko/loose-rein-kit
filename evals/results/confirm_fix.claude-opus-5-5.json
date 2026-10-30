@@ -8,24 +8,24 @@
   "model": "claude-opus-5-5",
   "cli": "2.1.314 (Claude Code)",
   "where": "host",
-  "scenario_digest": "sha256:aecc27cd22305f176424214a6bef03e947f6cf7b242a4986fd81fb7c95195a47",
+  "scenario_digest": "sha256:575b697cf456fb9a85f5ff3346c6f48d52336b7f63ccd05be8f547d901910d54",
   "launch_digests": {
-    "with": "sha256:c4c2d6c029095fc057b7b64754b59861b0e9984683689f7f2dcefdfe5ba5637a",
-    "without": "sha256:65711508adea12bc752348f5228f3b32d5b771dc101de3a455c278bb31f547c3"
+    "with": "sha256:ae2fa359e016755162a601ac4734b7d7fd1a0893726df5f35c565a99d880c579",
+    "without": "sha256:3cf70c907df83f36bffda62a4bba68f1057741c9ca3d054562a158633a951f7d"
   },
   "runs": [
     {
-      "at": "2026-10-30T03:22:29+00:00",
+      "at": "2026-10-30T11:07:38+00:00",
       "trials": 5,
-      "with": 5,
+      "with": 4,
       "without": 0
     }
   ],
   "trials": 5,
   "passed": {
-    "with": 5,
+    "with": 4,
     "without": 0
   },
-  "p": 0.004,
+  "p": 0.0238,
   "verdict": "holds"
 }

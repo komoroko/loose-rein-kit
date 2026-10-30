@@ -1,4 +1,4 @@
-"""What every implementer scenario's repository holds: a small product, a ticket, a dossier."""
+"""What the reviewer scenarios' repositories hold: a small product, a ticket, a dossier."""
 
 from __future__ import annotations
 
@@ -32,11 +32,3 @@ def ticket(root: Path, task: dag.Task, body: str) -> None:
     (root / "docs" / "20-design.md").write_text("# Design\n\nOne module, `src/greet.py`.\n", encoding="utf-8")
     document = dossier.build(task, plan=None, repo_path=lambda rel: root / rel)
     dossier.write(str(root), document)
-
-
-def changed(root: Path) -> str:
-    """Every tracked path that differs from the fixture's first commit, committed or not."""
-    from evals.harness import git
-
-    first = git(root, "rev-list", "--max-parents=0", "HEAD").split()[0]
-    return git(root, "diff", "--name-only", first)

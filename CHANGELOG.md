@@ -63,7 +63,7 @@ Thirteen change requests (CR-81 to CR-93).
   typing. Conversation stays in the person's language, and what the code prints stays English. **A
   repository that wrote its documents in another language reads `en` once it upgrades**: set
   `project.language: ja` (or its tag) in `config.yaml`.
-- **The sentences rein hands an agent are tested against a control (CR-88, CR-89, CR-94 to CR-97).**
+- **The sentences rein hands an agent are tested against a control (CR-88, CR-89, CR-94 to CR-100).**
   `evals/` holds behaviour tests: each scenario builds a repository, hands a real agent CLI the prompt
   rein would, and reads what the launch left — the `rein` calls a stub on PATH records, the files, the
   findings file — never a model's opinion of it. It runs in two arms, with and without the one sentence
@@ -81,15 +81,25 @@ Thirteen change requests (CR-81 to CR-93).
   asks an agent for nothing), or a list of `held` sentences, each `by` a scenario whose every record
   `holds` or by a unit test (`tests/<file>::<function>`) showing the code refuse the violation, with a
   `rest` for everything else. A bare `code` is refused; so is a held sentence not in its section once.
-  Four scenarios hold on `claude-opus-5-5`: a reviewer of a sound change writes an empty list (5/5
-  against 1/5), a confirming reader closes a correct fix (5/5 against 0/5), a resolver of two tasks
-  that cannot both hold reports `needs-revision` (4/5 against 0/5), and a repairer fixes the cause
-  rather than the line the finding named (5/5 against 0/5). One does not: an implementer whose
-  criterion needs a path outside its scope says so before doing the work 6/10 times with the sentence
-  and 2/10 without. The failure is real and the sentence prevents too little of it, so the section is
-  `unverified`; the scope itself is still held by the loop, which parks the task after the attempt. A
-  sentence on recording an open choice passed as often without it as with it, and is gone from
-  `implementer.md`.
+  **A launch carries nothing of the operator's but the login.** The CLI is started in safe mode with
+  no setting sources, so the operator's `CLAUDE.md`, rules, language, output style and permission
+  mode stay out of it; before, they reached every launch and none was in the key. An operator rule
+  that prefixes `PATH` sent agents past the stub to the installed `rein`, and those trials were
+  scored as the sentence failing. **Each trial's transcript is kept** under `evals/transcripts/`
+  (not committed), with its score and its `rein` calls, for as long as the record it counts in; the
+  CLI no longer keeps a copy of its own. The stub is allowed under every name it answers to: an agent
+  that called `.evalbin/rein` by path was refused, and its report counted as none.
+  Every record was measured again on isolated launches. Four scenarios hold on `claude-opus-5-5`: a
+  reviewer of a sound change writes an empty list (5/5 against 1/5), a confirming reader closes a
+  correct fix (4/5 against 0/5), a resolver of two tasks that cannot both hold reports
+  `needs-revision` (5/5 against 0/5), and a repairer fixes the cause rather than the line the finding
+  named (5/5 against 0/5). The sentence telling an implementer to report a criterion that needs a path
+  outside its scope before doing the work is gone from `implementer.md`, with its scenario: without
+  it, agents reported `needs-revision` every time, whether the path was in the criterion's own words
+  or implied by the test file its check runs. The rest of the document already says a scope change
+  is a human's. A sentence on recording an open choice, which passed as often without it, is gone
+  too. With the operator's permission mode out, the harness's own allowlist is what a launch gets:
+  some trials were refused a `git ls-tree` or a test run that `rein build` would allow.
   `implementer.md` also said a run that ends without `rein report` is treated as a failed attempt. It
   is judged on its diff: an empty one fails, any other goes to the gate. The sentence says so now.
 - **What an implementer decides is sorted by what overruling it would move, not by how much it

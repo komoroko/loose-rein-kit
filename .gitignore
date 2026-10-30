@@ -62,3 +62,8 @@ site/
 .claude/settings.local.json
 # scratch git worktrees the Claude Code CLI creates for isolated/forked runs
 .claude/worktrees/
+
+# ---- behaviour evals ----
+# Each trial's transcript, kept by evals/harness.py for as long as the record it counts in
+# (evals/results/, which is committed). Working material for reading why a trial failed, not evidence.
+/evals/transcripts/

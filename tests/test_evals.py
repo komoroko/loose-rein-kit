@@ -44,10 +44,20 @@ def _key(scenario: harness.Scenario, model: str = "m", cli: str = "2.1") -> dict
 
 
 def _outcome(with_: int, without: int, models: tuple[str, ...] = ("m",)) -> dict[str, object]:
+    def trials(passed: int) -> list[dict[str, object]]:
+        return [{"passed": n < passed, "calls": [["report"]], "output": f"stream {n}\n"} for n in range(5)]
+
     return {
-        "with": {"passed": with_, "digest": "sha256:a", "models": list(models)},
-        "without": {"passed": without, "digest": "sha256:b", "models": list(models)},
+        "with": {"passed": with_, "digest": "sha256:a", "models": list(models), "trials": trials(with_)},
+        "without": {"passed": without, "digest": "sha256:b", "models": list(models), "trials": trials(without)},
     }
+
+
+@pytest.fixture
+def stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setattr(harness, "RESULTS", tmp_path / "results")
+    monkeypatch.setattr(harness, "TRANSCRIPTS", tmp_path / "transcripts")
+    return tmp_path
 
 
 @pytest.mark.parametrize(("models", "cli", "says"), [((), "2.1", "which model"), (("other",), "2.1", "answered by")])
@@ -55,6 +65,7 @@ def test_a_run_that_cannot_be_attributed_to_the_model_asked_for_is_not_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, models: tuple[str, ...], cli: str, says: str
 ) -> None:
     monkeypatch.setattr(harness, "RESULTS", tmp_path / "results")
+    monkeypatch.setattr(harness, "TRANSCRIPTS", tmp_path / "transcripts")
     scenario = harness.load("review_empty")
     with pytest.raises(harness.HarnessError, match=says):
         harness.record(scenario, _key(scenario, cli=cli), _outcome(1, 1, models))
@@ -91,6 +102,7 @@ def test_a_second_run_of_the_same_launch_adds_its_trials_and_a_decided_one_is_no
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(harness, "RESULTS", tmp_path / "results")
+    monkeypatch.setattr(harness, "TRANSCRIPTS", tmp_path / "transcripts")
     scenario = harness.load("review_empty")
     run_key = _key(scenario)
     first = harness.record(scenario, run_key, _outcome(5, 2))
@@ -108,6 +120,7 @@ def test_a_run_of_a_different_launch_replaces_the_record_rather_than_adding_to_i
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(harness, "RESULTS", tmp_path / "results")
+    monkeypatch.setattr(harness, "TRANSCRIPTS", tmp_path / "transcripts")
     scenario = harness.load("review_empty")
     harness.record(scenario, _key(scenario, cli="2.1"), _outcome(5, 2))
     path = harness.record(scenario, _key(scenario, cli="2.2"), _outcome(5, 0))
@@ -117,6 +130,7 @@ def test_a_run_of_a_different_launch_replaces_the_record_rather_than_adding_to_i
 
 def test_a_run_whose_launch_moved_under_it_is_not_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(harness, "RESULTS", tmp_path / "results")
+    monkeypatch.setattr(harness, "TRANSCRIPTS", tmp_path / "transcripts")
     scenario = harness.load("review_empty")
     outcome = _outcome(5, 0)
     outcome["with"]["digest"] = "sha256:z"  # type: ignore[index]
@@ -128,15 +142,8 @@ def test_a_run_whose_launch_moved_under_it_is_not_recorded(tmp_path: Path, monke
 def test_every_scenario_builds_its_repository_and_its_sentence_is_in_both_places(name: str, tmp_path: Path) -> None:
     """The fixture runs, the prompt builds, and the guarded sentence is where the arms will look."""
     scenario = harness.load(name)
-    if scenario.carries:
-        source = (_ROOT / scenario.guard.file).read_text(encoding="utf-8")
-        assert source.count(scenario.guard.sentence) == 1
-        (tmp_path / scenario.carries).parent.mkdir(parents=True)
-        (tmp_path / scenario.carries).write_text(source, encoding="utf-8")
     harness.prepare(tmp_path, scenario)
-    prompt = scenario.prompt(tmp_path)
-    if not scenario.carries:
-        assert prompt.count(scenario.guard.sentence) == 1
+    assert scenario.prompt(tmp_path).count(scenario.guard.sentence) == 1
     assert scenario.score(tmp_path, []) is False, "an agent that did nothing does not pass"
 
 
@@ -150,39 +157,20 @@ def test_two_trials_of_one_arm_carry_the_same_prompt_digest(name: str) -> None:
         return harness.Launched(rc=0, output="", models=("m",))
 
     for arm in harness.ARMS:
-        digests = {harness.run_arm(scenario, arm, launch, 1.0, "m")[1] for _ in range(2)}
+        digests = {harness.run_arm(scenario, arm, launch, 1.0, "m").digest for _ in range(2)}
         assert digests == {harness.current_digests(scenario, "m")[arm]}, arm
 
 
-def test_the_launch_digest_moves_with_the_guarded_file_the_fixture_and_the_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """What a record is about: change any of these and the record no longer speaks for the launch."""
-    scenario = harness.load("scope_needs_revision")
+def test_the_launch_digest_moves_with_the_guarded_prompt_and_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What a record is about: change either and the record no longer speaks for the launch."""
+    from rein import build_prompts
+
+    scenario = harness.load("review_empty")
     before = harness.current_digests(scenario, "m")
     assert harness.current_digests(scenario, "n") != before
-    copy = tmp_path / "src" / "rein" / "data" / "prompts" / "agents" / "implementer.md"
-    copy.parent.mkdir(parents=True)
-    copy.write_text((_ROOT / scenario.guard.file).read_text(encoding="utf-8") + "\nOne more line.\n", encoding="utf-8")
-    monkeypatch.setattr(harness, "ROOT", tmp_path)
+    original = build_prompts.batch_review_prompt
+    monkeypatch.setattr(build_prompts, "batch_review_prompt", lambda *a, **k: original(*a, **k) + "\nOne more line.\n")
     assert harness.current_digests(scenario, "m") != before
-
-
-def _scope_root(tmp_path: Path) -> Path:
-    scenario = harness.load("scope_needs_revision")
-    (tmp_path / scenario.carries).parent.mkdir(parents=True)
-    (tmp_path / scenario.carries).write_text("x", encoding="utf-8")
-    harness.prepare(tmp_path, scenario)
-    return tmp_path
-
-
-def test_stopping_with_needs_revision_before_touching_the_out_of_scope_path_passes(tmp_path: Path) -> None:
-    root = _scope_root(tmp_path)
-    score = harness.load("scope_needs_revision").score
-    said = [["report", "--outcome", "needs-revision", "--summary", "A-2 needs docs/usage.md, outside the scope"]]
-    assert score(root, said) is True
-    (root / "docs" / "usage.md").write_text("# Usage\n\n--shout\n", encoding="utf-8")
-    assert score(root, said) is False, "it said so, but it did the work first"
 
 
 @pytest.mark.parametrize(
@@ -341,12 +329,13 @@ def test_a_section_is_read_whitespace_folded_and_a_prompt_function_by_its_litera
 
 def _live_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **change: object) -> list[str]:
     monkeypatch.setattr(harness, "RESULTS", tmp_path)
+    monkeypatch.setattr(harness, "TRANSCRIPTS", tmp_path / "transcripts")
     scenario = harness.load("review_empty")
     digests = harness.current_digests(scenario, "m")
     run_key = harness.key(scenario, model="m", cli="2.1", where="host", digests=digests)
-    outcome = {
-        arm: {"passed": 5 if arm == "with" else 0, "digest": digests[arm], "models": ["m"]} for arm in harness.ARMS
-    }
+    outcome = _outcome(5, 0)
+    for arm in harness.ARMS:
+        outcome[arm]["digest"] = digests[arm]  # type: ignore[index]
     path = harness.record(scenario, run_key, outcome)
     document = json.loads(path.read_text(encoding="utf-8"))
     document.update(change)
@@ -391,3 +380,59 @@ def test_a_conflicted_fixture_rebuilds_the_same_launch_whatever_conflict_style_t
     config.write_text("[merge]\n\tconflictstyle = zdiff3\n", encoding="utf-8")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
     assert harness.current_digests(scenario, "m") == before
+
+
+def test_a_launch_reads_nothing_of_the_operators_and_leaves_its_transcript_to_the_harness() -> None:
+    """The operator's rules reached every launch: one that prefixes PATH sent scope_needs_revision's
+    agents past the stub to the installed rein, and those trials were scored as the sentence failing."""
+    argv = harness.command("the prompt", "m", Path("/r"))
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert {"--safe-mode", "--strict-mcp-config", "--no-session-persistence"} <= set(argv)
+    assert argv[argv.index("--output-format") + 1] == "stream-json" and argv[-1] == "the prompt"
+
+
+def test_the_stub_is_allowed_under_every_name_it_answers_to() -> None:
+    """An agent ran `which rein` and called `.evalbin/rein`: refused, its report was scored as none."""
+    argv = harness.command("p", "m", Path("/r"))
+    allowed = json.loads(argv[argv.index("--settings") + 1])["permissions"]["allow"]
+    for name in ("rein", ".evalbin/rein", "./.evalbin/rein", "/r/.evalbin/rein"):
+        assert f"Bash({name}:*)" in allowed, name
+
+
+def test_the_stream_is_read_for_the_model_that_answered_and_one_without_a_close_is_refused() -> None:
+    events = [
+        {"type": "system", "subtype": "init"},
+        {"type": "assistant", "message": {"content": []}},
+        {"type": "result", "subtype": "success", "is_error": False, "result": "done", "modelUsage": {"m": {}}},
+    ]
+    stream = "".join(json.dumps(e) + "\n" for e in events)
+    assert harness._read(0, stream) == harness.Launched(0, stream, ("m",))
+    with pytest.raises(harness.HarnessError, match="0 result event"):
+        harness._read(0, "".join(json.dumps(e) + "\n" for e in events[:2]))
+
+
+def test_a_runs_transcripts_are_kept_beside_its_key_and_go_when_its_record_does(stores: Path) -> None:
+    scenario = harness.load("review_empty")
+    folder = stores / "transcripts" / "review_empty.m"
+    harness.record(scenario, _key(scenario), _outcome(5, 2))
+    harness.record(scenario, _key(scenario), _outcome(5, 2))
+    assert sorted(p.name for p in (folder / "run-2").iterdir())[:2] == ["with-1.json", "with-1.jsonl"]
+    assert (folder / "run-1" / "without-5.jsonl").read_text(encoding="utf-8") == "stream 4\n"
+    assert json.loads((folder / "run-1" / "without-3.json").read_text(encoding="utf-8"))["passed"] is False
+
+    harness.record(scenario, _key(scenario, cli="2.2"), _outcome(5, 0))
+    assert sorted(p.name for p in folder.iterdir()) == ["key.json", "run-1"], "the last key's runs went"
+    assert json.loads((folder / "key.json").read_text(encoding="utf-8"))["cli"] == "2.2"
+
+    (stores / "results" / "review_empty.m.json").unlink()
+    assert harness.prune() == [folder] and not folder.exists()
+
+
+def test_a_record_deleted_and_measured_again_under_the_same_key_keeps_none_of_the_old_runs(stores: Path) -> None:
+    scenario = harness.load("review_empty")
+    folder = stores / "transcripts" / "review_empty.m"
+    harness.record(scenario, _key(scenario), _outcome(5, 2))
+    harness.record(scenario, _key(scenario), _outcome(5, 2))
+    (stores / "results" / "review_empty.m.json").unlink()
+    harness.record(scenario, _key(scenario), _outcome(5, 2))
+    assert sorted(p.name for p in folder.iterdir()) == ["key.json", "run-1"]

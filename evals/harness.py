@@ -24,6 +24,13 @@ sentence rather than a gap in this file.
 `.rein/config.yaml`; `--host` launches on this machine, with this user's CLI login. `--model` is
 passed to the CLI, and a launch that reports another model answering is refused. None is assumed.
 
+**The launch carries nothing of the operator's but the login.** The CLI is started in safe mode with
+no setting sources: the operator's `CLAUDE.md`, rules, `language`, output style and permission mode
+are not read, so `ALLOWED` and the stub are all a launch may run. They reached every launch before, and none was
+in the key: an operator rule that prefixes `PATH` sent agents past the stub to the installed `rein`,
+and the trials that did so were scored as the sentence failing. Policy settings the machine's
+administrator installed still apply, and are part of what `where` names.
+
 **A record is about the launch it measured (devr 論点 T).** Its key is each arm's launch digest —
 the command, the prompt and the repository the agent was handed — the scenario's own digest — its
 fixture and its score — the model, the CLI's version and where it ran. `template_lint` rebuilds the
@@ -37,8 +44,16 @@ one-sided Fisher exact test at `ALPHA` per look, over at most `LOOKS` looks — 
 whole under 0.05. The verdict is `holds`, `not-reproduced` (the arm without the sentence never
 failed: the scenario did not produce what the sentence prevents), `undecided` (look again) or
 `does-not-hold`; once one other than `undecided` is reached, the key is not run again. A record
-whose key differs replaces the last one for that scenario and model. The scratch repositories and
-transcripts are deleted once the record is written.
+whose key differs replaces the last one for that scenario and model.
+
+**The harness keeps each trial's transcript for as long as the record it counts in (devr 論点 V).**
+A count says how often an arm passed, not why a trial failed, and the score is code that can be
+wrong about a launch: a scenario's record in 0.16.0 was read as its sentence failing until the
+transcripts the CLI had kept were read. The CLI is told not to keep its own copy; the harness
+writes the stream it printed, with the trial's score and its `rein` calls, under
+`evals/transcripts/<scenario>.<model>/`, beside the key it belongs to. They are working material,
+not evidence, and are not committed: the directory starts afresh with its record's first run, and
+goes when its record does. The scratch repositories are deleted after each trial.
 """
 
 from __future__ import annotations
@@ -66,6 +81,7 @@ from rein import store as store_mod
 EVALS = Path(__file__).resolve().parent
 ROOT = EVALS.parent
 RESULTS = EVALS / "results"
+TRANSCRIPTS = EVALS / "transcripts"
 SCENARIOS = EVALS / "scenarios"
 ARMS = ("with", "without")
 ALPHA = 0.025
@@ -127,10 +143,6 @@ class Scenario:
     prompt: Callable[[Path], str]
     #: Did the launch do what the sentence claims? Reads `root` and the stub's recorded calls.
     score: Callable[[Path, list[list[str]]], bool]
-    #: Where the guarded file goes in the repository, when the agent is sent to read it rather than
-    #: handed it in the prompt (`implementer.md` is read from `.rein/prompts/`). The harness writes
-    #: it there, with the arm applied, before the fixture runs.
-    carries: str = ""
     #: The prompt the `without` arm is handed, when what the guarded sentence replaced is a whole
     #: prompt rather than the absence of the sentence (CR-93 replaced the full re-read with a
     #: confirmation). The guarded sentence must still be in the `with` arm's prompt exactly once.
@@ -188,13 +200,29 @@ def prepare(root: Path, scenario: Scenario) -> None:
     (root / ".git" / "info" / "exclude").write_text(".evalbin/\n", encoding="utf-8")
 
 
-def command(prompt: str, model: str) -> list[str]:
+#: What keeps a launch to the scenario's own inputs, and its transcript to the harness. Not the
+#: adapter's `config_isolation`, which `rein build` uses on purpose to carry the operator's settings.
+ISOLATION = (
+    "--safe-mode",
+    "--setting-sources",
+    "",
+    "--strict-mcp-config",
+    "--no-session-persistence",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+)
+
+
+def command(prompt: str, model: str, root: Path) -> list[str]:
+    """`rein` is allowed under every name the stub answers to: an agent that ran `which rein` and
+    called the path it printed was refused, and a correct report was scored as no report."""
     claude = adapters.ADAPTER_TABLE["claude"]
-    settings = json.dumps({"permissions": {"allow": list(ALLOWED)}})
+    stub = [f"Bash({name}:*)" for name in (".evalbin/rein", "./.evalbin/rein", f"{root}/.evalbin/rein")]
+    settings = json.dumps({"permissions": {"allow": [*ALLOWED, *stub]}})
     return [
         *claude.argv,
-        *claude.config_isolation,
-        *claude.usage_flags,
+        *ISOLATION,
         "--settings",
         settings,
         "--model",
@@ -205,21 +233,13 @@ def command(prompt: str, model: str) -> list[str]:
 
 def stage(scenario: Scenario, arm: str, root: Path, model: str) -> list[str]:
     """Lay `arm` of the scenario out in the empty directory `root`, and return the command that launches it."""
-    if scenario.carries:
-        # Written before the fixture runs, so whatever the fixture commits already holds it:
-        # nothing in the repository's history says which arm this is.
-        source = (ROOT / scenario.guard.file).read_text(encoding="utf-8")
-        (root / scenario.carries).parent.mkdir(parents=True, exist_ok=True)
-        (root / scenario.carries).write_text(arm_prompt(source, scenario.guard.sentence, arm), encoding="utf-8")
     prepare(root, scenario)
-    if scenario.carries:
-        prompt = scenario.prompt(root)
-    elif scenario.control is not None:
+    if scenario.control is not None:
         prompt = arm_prompt(scenario.prompt(root), scenario.guard.sentence, "with")
         prompt = prompt if arm == "with" else scenario.control(root)
     else:
         prompt = arm_prompt(scenario.prompt(root), scenario.guard.sentence, arm)
-    return command(prompt, model)
+    return command(prompt, model, root)
 
 
 def launch_digest(root: Path, argv: Sequence[str]) -> str:
@@ -313,21 +333,33 @@ def launch_contained(profile: models.ExecutorProfile) -> Callable[[Path, list[st
 
 
 def _read(rc: int, output: str) -> Launched:
+    """The stream's closing `result` event is the envelope `--output-format json` would have printed."""
     if rc != 0:
         return Launched(rc, output, ())
-    _, spent = usage.parse_claude_envelope(output)
+    events = [json.loads(line) for line in output.splitlines() if line.strip()]
+    results = [e for e in events if isinstance(e, dict) and e.get("type") == "result"]
+    if len(results) != 1:
+        raise HarnessError(f"the launch's stream closed with {len(results)} result event(s), not one")
+    _, spent = usage.parse_claude_envelope(json.dumps(results[0]))
     return Launched(rc, output, spent.models)
+
+
+@dataclass(frozen=True)
+class Trial:
+    passed: bool
+    #: Taken before the launch, over what the agent is handed.
+    digest: str
+    models: tuple[str, ...]
+    #: What the launch printed — its transcript — and what it called `rein` with.
+    output: str
+    calls: list[list[str]]
 
 
 def run_arm(
     scenario: Scenario, arm: str, launch: Callable[[Path, list[str], float], Launched], timeout: float, model: str
-) -> tuple[bool, str, tuple[str, ...]]:
-    """One trial of one arm: `(passed, launch digest, models that answered)`.
-
-    The digest is taken before the launch, over what the agent is handed. The scratch repository is
-    removed whatever happened: a run's record is the count, and a transcript kept past it is a
-    second record nobody reads.
-    """
+) -> Trial:
+    """One trial of one arm. The scratch repository is removed whatever happened; the transcript
+    travels in the result, to be kept with the record it counts in."""
     root = Path(tempfile.mkdtemp(prefix=f"rein-eval-{scenario.name}-"))
     try:
         argv = stage(scenario, arm, root, model)
@@ -337,7 +369,8 @@ def run_arm(
             raise HarnessError(
                 f"{scenario.name} [{arm}]: the launch failed (rc {launched.rc}):\n{launched.output[-2000:]}"
             )
-        return scenario.score(root, calls(root)), digest, launched.models
+        made = calls(root)
+        return Trial(scenario.score(root, made), digest, launched.models, launched.output, made)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -383,8 +416,45 @@ def prior(scenario: Scenario, run_key: dict[str, Any]) -> dict[str, Any] | None:
     return document
 
 
+def transcripts_path(name: str, model: str) -> Path:
+    return TRANSCRIPTS / f"{name}.{model}"
+
+
+def keep(scenario: Scenario, run_key: dict[str, Any], run: int, outcome: dict[str, Any]) -> None:
+    """Write the run's transcripts beside its key. The first run of a record starts the directory
+    afresh: what is there belongs to another key, or to a record of this one that was deleted."""
+    folder = transcripts_path(scenario.name, run_key["model"])
+    key_file = folder / "key.json"
+    if run == 1 and folder.exists():
+        shutil.rmtree(folder)
+    (folder / f"run-{run}").mkdir(parents=True, exist_ok=True)
+    key_file.write_text(json.dumps(run_key, indent=2) + "\n", encoding="utf-8")
+    for arm in ARMS:
+        for number, trial in enumerate(outcome[arm]["trials"], start=1):
+            stem = folder / f"run-{run}" / f"{arm}-{number}"
+            stem.with_suffix(".jsonl").write_text(trial["output"], encoding="utf-8")
+            score = {"passed": trial["passed"], "calls": trial["calls"]}
+            stem.with_suffix(".json").write_text(json.dumps(score, indent=2) + "\n", encoding="utf-8")
+
+
+def prune() -> list[Path]:
+    """Remove every transcript directory whose record is gone or was measured under another key."""
+    removed: list[Path] = []
+    for folder in sorted(TRANSCRIPTS.iterdir()) if TRANSCRIPTS.exists() else []:
+        path = RESULTS / f"{folder.name}.json"
+        key_file = folder / "key.json"
+        if path.exists() and key_file.exists():
+            kept = json.loads(key_file.read_text(encoding="utf-8"))
+            if _key_of(json.loads(path.read_text(encoding="utf-8"))) == kept:
+                continue
+        shutil.rmtree(folder)
+        removed.append(folder)
+    return removed
+
+
 def record(scenario: Scenario, run_key: dict[str, Any], outcome: dict[str, Any]) -> Path:
-    """Add the run to the record its key names, or start one; write the verdict over every trial."""
+    """Add the run to the record its key names, or start one; write the verdict over every trial,
+    and keep the run's transcripts with it."""
     answered = {m for arm in ARMS for m in outcome[arm]["models"]}
     if not answered:
         raise HarnessError("no launch reported which model answered — the run cannot be recorded")
@@ -418,6 +488,8 @@ def record(scenario: Scenario, run_key: dict[str, Any], outcome: dict[str, Any])
     path = record_path(scenario.name, run_key["model"])
     RESULTS.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    keep(scenario, run_key, len(runs), outcome)
+    prune()
     return path
 
 
@@ -427,18 +499,20 @@ def evaluate(
     outcome: dict[str, Any] = {}
     trials = scenario.trials
     for arm in ARMS:
-        passed = 0
-        digests: set[str] = set()
-        seen: set[str] = set()
-        for trial in range(trials):
-            ok, digest, answered = run_arm(scenario, arm, launch, timeout, model)
-            passed += int(ok)
-            digests.add(digest)
-            seen.update(answered)
-            print(f"  {scenario.name} [{arm}] trial {trial + 1}/{trials}: {'yes' if ok else 'no'}", flush=True)
+        done: list[Trial] = []
+        for number in range(1, trials + 1):
+            done.append(run_arm(scenario, arm, launch, timeout, model))
+            said = "yes" if done[-1].passed else "no"
+            print(f"  {scenario.name} [{arm}] trial {number}/{trials}: {said}", flush=True)
+        digests = {t.digest for t in done}
         if len(digests) != 1:
             raise HarnessError(f"{scenario.name} [{arm}]: the prompt differed between trials")
-        outcome[arm] = {"passed": passed, "digest": digests.pop(), "models": sorted(seen)}
+        outcome[arm] = {
+            "passed": sum(t.passed for t in done),
+            "digest": digests.pop(),
+            "models": sorted({m for t in done for m in t.models}),
+            "trials": [{"passed": t.passed, "calls": t.calls, "output": t.output} for t in done],
+        }
     return outcome
 
 
