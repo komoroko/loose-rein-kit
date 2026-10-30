@@ -12,6 +12,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -43,14 +44,17 @@ def _key(scenario: harness.Scenario, model: str = "m", cli: str = "2.1") -> dict
     )
 
 
-def _outcome(with_: int, without: int, models: tuple[str, ...] = ("m",)) -> dict[str, object]:
-    def trials(passed: int) -> list[dict[str, object]]:
-        return [{"passed": n < passed, "calls": [["report"]], "output": f"stream {n}\n"} for n in range(5)]
+def _trial(passed: bool, digest: str, models: tuple[str, ...] = ("m",), n: int = 0) -> harness.Trial:
+    return harness.Trial(passed, digest, models, f"stream {n}\n", [["report"]])
 
-    return {
-        "with": {"passed": with_, "digest": "sha256:a", "models": list(models), "trials": trials(with_)},
-        "without": {"passed": without, "digest": "sha256:b", "models": list(models), "trials": trials(without)},
-    }
+
+def _run(scenario: harness.Scenario, run_key: dict[str, Any], with_: int, without: int) -> Path:
+    """One complete run of five trials per arm, written trial by trial as `evaluate` writes it."""
+    ledger = harness.Ledger(scenario, run_key)
+    for arm, passed in (("with", with_), ("without", without)):
+        for n in range(5):
+            ledger.add(arm, _trial(n < passed, run_key["launch_digests"][arm], n=n))
+    return ledger.close()
 
 
 @pytest.fixture
@@ -67,9 +71,10 @@ def test_a_run_that_cannot_be_attributed_to_the_model_asked_for_is_not_recorded(
     monkeypatch.setattr(harness, "RESULTS", tmp_path / "results")
     monkeypatch.setattr(harness, "TRANSCRIPTS", tmp_path / "transcripts")
     scenario = harness.load("review_empty")
+    ledger = harness.Ledger(scenario, _key(scenario, cli=cli))
     with pytest.raises(harness.HarnessError, match=says):
-        harness.record(scenario, _key(scenario, cli=cli), _outcome(1, 1, models))
-    assert not (tmp_path / "results").exists()
+        ledger.add("with", _trial(True, "sha256:a", models))
+    assert ledger.remaining("with") == 5 and not (tmp_path / "results").exists()
 
 
 def test_an_unknown_cli_version_keys_nothing() -> None:
@@ -105,9 +110,9 @@ def test_a_second_run_of_the_same_launch_adds_its_trials_and_a_decided_one_is_no
     monkeypatch.setattr(harness, "TRANSCRIPTS", tmp_path / "transcripts")
     scenario = harness.load("review_empty")
     run_key = _key(scenario)
-    first = harness.record(scenario, run_key, _outcome(5, 2))
+    first = _run(scenario, run_key, 5, 2)
     assert json.loads(first.read_text(encoding="utf-8"))["verdict"] == "undecided"
-    second = harness.record(scenario, run_key, _outcome(5, 2))
+    second = _run(scenario, run_key, 5, 2)
     document = json.loads(second.read_text(encoding="utf-8"))
     assert first == second and list((tmp_path / "results").iterdir()) == [first]
     assert document["trials"] == 10 and document["passed"] == {"with": 10, "without": 4}
@@ -122,8 +127,8 @@ def test_a_run_of_a_different_launch_replaces_the_record_rather_than_adding_to_i
     monkeypatch.setattr(harness, "RESULTS", tmp_path / "results")
     monkeypatch.setattr(harness, "TRANSCRIPTS", tmp_path / "transcripts")
     scenario = harness.load("review_empty")
-    harness.record(scenario, _key(scenario, cli="2.1"), _outcome(5, 2))
-    path = harness.record(scenario, _key(scenario, cli="2.2"), _outcome(5, 0))
+    _run(scenario, _key(scenario, cli="2.1"), 5, 2)
+    path = _run(scenario, _key(scenario, cli="2.2"), 5, 0)
     document = json.loads(path.read_text(encoding="utf-8"))
     assert document["cli"] == "2.2" and document["trials"] == 5 and document["verdict"] == "holds"
 
@@ -132,10 +137,10 @@ def test_a_run_whose_launch_moved_under_it_is_not_recorded(tmp_path: Path, monke
     monkeypatch.setattr(harness, "RESULTS", tmp_path / "results")
     monkeypatch.setattr(harness, "TRANSCRIPTS", tmp_path / "transcripts")
     scenario = harness.load("review_empty")
-    outcome = _outcome(5, 0)
-    outcome["with"]["digest"] = "sha256:z"  # type: ignore[index]
+    ledger = harness.Ledger(scenario, _key(scenario))
     with pytest.raises(harness.HarnessError, match="differed"):
-        harness.record(scenario, _key(scenario), outcome)
+        ledger.add("with", _trial(True, "sha256:z"))
+    assert ledger.remaining("with") == 5
 
 
 @pytest.mark.parametrize("name", harness.names())
@@ -333,10 +338,7 @@ def _live_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **change: obje
     scenario = harness.load("review_empty")
     digests = harness.current_digests(scenario, "m")
     run_key = harness.key(scenario, model="m", cli="2.1", where="host", digests=digests)
-    outcome = _outcome(5, 0)
-    for arm in harness.ARMS:
-        outcome[arm]["digest"] = digests[arm]  # type: ignore[index]
-    path = harness.record(scenario, run_key, outcome)
+    path = _run(scenario, run_key, 5, 0)
     document = json.loads(path.read_text(encoding="utf-8"))
     document.update(change)
     path.write_text(json.dumps(document), encoding="utf-8")
@@ -359,6 +361,7 @@ def test_a_record_of_the_launch_as_it_ships_is_read_for_its_verdict(
         ({"launch_digests": {"with": "sha256:old", "without": "sha256:old"}}, "hands the agent changed"),
         ({"scenario_digest": "sha256:old"}, "or its fixtures changed"),
         ({"scenario": "gone"}, "no longer exists"),
+        ({"pending": {"at": "t", "with": [True], "without": [], "aborted": []}}, "stopped part-way"),
     ],
 )
 def test_a_record_of_a_launch_that_no_longer_ships_is_refused(
@@ -427,13 +430,13 @@ def test_the_stream_is_read_for_the_model_that_answered_and_one_without_a_close_
 def test_a_runs_transcripts_are_kept_beside_its_key_and_go_when_its_record_does(stores: Path) -> None:
     scenario = harness.load("review_empty")
     folder = stores / "transcripts" / "review_empty.m"
-    harness.record(scenario, _key(scenario), _outcome(5, 2))
-    harness.record(scenario, _key(scenario), _outcome(5, 2))
+    _run(scenario, _key(scenario), 5, 2)
+    _run(scenario, _key(scenario), 5, 2)
     assert sorted(p.name for p in (folder / "run-2").iterdir())[:2] == ["with-1.json", "with-1.jsonl"]
     assert (folder / "run-1" / "without-5.jsonl").read_text(encoding="utf-8") == "stream 4\n"
     assert json.loads((folder / "run-1" / "without-3.json").read_text(encoding="utf-8"))["passed"] is False
 
-    harness.record(scenario, _key(scenario, cli="2.2"), _outcome(5, 0))
+    _run(scenario, _key(scenario, cli="2.2"), 5, 0)
     assert sorted(p.name for p in folder.iterdir()) == ["key.json", "run-1"], "the last key's runs went"
     assert json.loads((folder / "key.json").read_text(encoding="utf-8"))["cli"] == "2.2"
 
@@ -444,8 +447,41 @@ def test_a_runs_transcripts_are_kept_beside_its_key_and_go_when_its_record_does(
 def test_a_record_deleted_and_measured_again_under_the_same_key_keeps_none_of_the_old_runs(stores: Path) -> None:
     scenario = harness.load("review_empty")
     folder = stores / "transcripts" / "review_empty.m"
-    harness.record(scenario, _key(scenario), _outcome(5, 2))
-    harness.record(scenario, _key(scenario), _outcome(5, 2))
+    _run(scenario, _key(scenario), 5, 2)
+    _run(scenario, _key(scenario), 5, 2)
     (stores / "results" / "review_empty.m.json").unlink()
-    harness.record(scenario, _key(scenario), _outcome(5, 2))
+    _run(scenario, _key(scenario), 5, 2)
     assert sorted(p.name for p in folder.iterdir()) == ["key.json", "run-1"]
+
+
+def test_a_stopped_run_keeps_its_trials_and_the_next_run_of_the_key_fills_the_rest(stores: Path) -> None:
+    """A usage limit stopped a run in its second arm, and every trial it had taken was thrown away:
+    a run that can be stopped and started again draws again whatever it had seen."""
+    scenario = harness.load("review_empty")
+    run_key = harness.key(scenario, model="m", cli="2.1", where="host", digests=harness.current_digests(scenario, "m"))
+    launched: list[str] = []
+
+    def limited(root: Path, argv: list[str], timeout: float) -> harness.Launched:
+        launched.append(argv[-1])
+        if len(launched) == 8:
+            return harness.Launched(rc=1, output="You've hit your limit", models=())
+        return harness.Launched(rc=0, output="stream\n", models=("m",))
+
+    with pytest.raises(harness.HarnessError, match="launch failed"):
+        harness.evaluate(scenario, run_key, limited, timeout=1.0)
+    path = stores / "results" / "review_empty.m.json"
+    stopped = json.loads(path.read_text(encoding="utf-8"))
+    assert stopped["runs"] == [] and stopped["verdict"] == "undecided"
+    assert [len(stopped["pending"][arm]) for arm in harness.ARMS] == [5, 2]
+    assert stopped["pending"]["aborted"] == [
+        {"arm": "without", "trial": 3, "reason": "review_empty [without]: the launch failed (rc 1):"}
+    ]
+    assert len(list((stores / "transcripts" / "review_empty.m" / "run-1").glob("*.jsonl"))) == 7
+
+    harness.evaluate(
+        scenario, run_key, lambda root, argv, timeout: harness.Launched(0, "stream\n", ("m",)), timeout=1.0
+    )
+    closed = json.loads(path.read_text(encoding="utf-8"))
+    assert "pending" not in closed and len(closed["runs"]) == 1 and closed["trials"] == 5
+    assert closed["runs"][0]["aborted"] == stopped["pending"]["aborted"]
+    assert len(list((stores / "transcripts" / "review_empty.m" / "run-1").glob("*.jsonl"))) == 10

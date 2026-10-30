@@ -39,7 +39,9 @@ measured on a prompt that has since changed is not evidence about the one that s
 
 **Judged by the difference, and trials are added, never re-drawn.** Each run spends the scenario's
 own `trials` per arm. A run whose key matches the record adds to it rather than replacing it, so
-running again cannot discard the trials that came out the wrong way. The arms are compared by a
+running again cannot discard the trials that came out the wrong way. Nor can stopping part-way:
+each trial is written as it ends, and the next run of the key fills the stopped one (`Ledger`,
+devr 論点 X). The arms are compared by a
 one-sided Fisher exact test at `ALPHA` per look, over at most `LOOKS` looks — two at 0.025 keep the
 whole under 0.05. The verdict is `holds`, `not-reproduced` (the arm without the sentence never
 failed: the scenario did not produce what the sentence prevents), `undecided` (look again) or
@@ -430,23 +432,6 @@ def transcripts_path(name: str, model: str) -> Path:
     return TRANSCRIPTS / f"{name}.{model}"
 
 
-def keep(scenario: Scenario, run_key: dict[str, Any], run: int, outcome: dict[str, Any]) -> None:
-    """Write the run's transcripts beside its key. The first run of a record starts the directory
-    afresh: what is there belongs to another key, or to a record of this one that was deleted."""
-    folder = transcripts_path(scenario.name, run_key["model"])
-    key_file = folder / "key.json"
-    if run == 1 and folder.exists():
-        shutil.rmtree(folder)
-    (folder / f"run-{run}").mkdir(parents=True, exist_ok=True)
-    key_file.write_text(json.dumps(run_key, indent=2) + "\n", encoding="utf-8")
-    for arm in ARMS:
-        for number, trial in enumerate(outcome[arm]["trials"], start=1):
-            stem = folder / f"run-{run}" / f"{arm}-{number}"
-            stem.with_suffix(".jsonl").write_text(trial["output"], encoding="utf-8")
-            score = {"passed": trial["passed"], "calls": trial["calls"]}
-            stem.with_suffix(".json").write_text(json.dumps(score, indent=2) + "\n", encoding="utf-8")
-
-
 def prune() -> list[Path]:
     """Remove every transcript directory whose record is gone or was measured under another key."""
     removed: list[Path] = []
@@ -462,68 +447,128 @@ def prune() -> list[Path]:
     return removed
 
 
-def record(scenario: Scenario, run_key: dict[str, Any], outcome: dict[str, Any]) -> Path:
-    """Add the run to the record its key names, or start one; write the verdict over every trial,
-    and keep the run's transcripts with it."""
-    answered = {m for arm in ARMS for m in outcome[arm]["models"]}
-    if not answered:
-        raise HarnessError("no launch reported which model answered — the run cannot be recorded")
-    if answered != {run_key["model"]}:
-        raise HarnessError(f"asked for {run_key['model']}, answered by {', '.join(sorted(answered))} — not recorded")
-    for arm in ARMS:
-        if outcome[arm]["digest"] != run_key["launch_digests"][arm]:
-            raise HarnessError(f"{scenario.name} [{arm}]: the launch differed from the one this run was keyed on")
-    before = prior(scenario, run_key)
-    runs = [
-        *(before["runs"] if before else []),
-        {
+class Ledger:
+    """The record of one scenario under one key, written after every trial (devr 論点 X).
+
+    A run's trials collect in the record's `pending` as each one ends; a run whose arms both reach
+    the scenario's `trials` is closed into `runs` and judged. A run that stops — a launch that fails,
+    an operator who interrupts — leaves its trials there, and the next run of the same key fills the
+    rest rather than starting over: a trial that was taken is never drawn again. A launch that fails
+    is not a trial, having nothing to score, but it is written to `aborted` before the run stops, so
+    a failure that falls on one arm is in the record. `template_lint` refuses a record with a
+    `pending` run: it is not a count yet.
+    """
+
+    def __init__(self, scenario: Scenario, run_key: dict[str, Any]) -> None:
+        self.scenario = scenario
+        self.key = run_key
+        self.path = record_path(scenario.name, run_key["model"])
+        before = prior(scenario, run_key)
+        if before is None:
+            # A new record. Its transcripts start afresh: what is there belongs to another key, or
+            # to a record of this one that was deleted.
+            folder = transcripts_path(scenario.name, run_key["model"])
+            if folder.exists():
+                shutil.rmtree(folder)
+            before = {"runs": []}
+        self.runs: list[dict[str, Any]] = before["runs"]
+        self.pending: dict[str, Any] = before.get("pending") or {
             "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "trials": scenario.trials,
-            **{arm: outcome[arm]["passed"] for arm in ARMS},
-        },
-    ]
-    trials = sum(r["trials"] for r in runs)
-    passed = {arm: sum(r[arm] for r in runs) for arm in ARMS}
-    p, verdict = judge(passed["with"], passed["without"], trials, len(runs))
-    document = {
-        "scenario": scenario.name,
-        "guard": {"file": scenario.guard.file, "section": scenario.guard.section, "cr": scenario.guard.cr},
-        **run_key,
-        "runs": runs,
-        "trials": trials,
-        "passed": passed,
-        "p": round(p, 4),
-        "verdict": verdict,
-    }
-    path = record_path(scenario.name, run_key["model"])
-    RESULTS.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    keep(scenario, run_key, len(runs), outcome)
-    prune()
-    return path
+            **{arm: [] for arm in ARMS},
+            "aborted": [],
+        }
+
+    def remaining(self, arm: str) -> int:
+        return self.scenario.trials - len(self.pending[arm])
+
+    def add(self, arm: str, trial: Trial) -> None:
+        """Count one trial, or refuse it — and stop — when it is not a trial of this key."""
+        if trial.digest != self.key["launch_digests"][arm]:
+            raise HarnessError(f"{self.scenario.name} [{arm}]: the launch differed from the one this run was keyed on")
+        if not trial.models:
+            raise HarnessError("the launch did not report which model answered — not recorded")
+        if set(trial.models) != {self.key["model"]}:
+            raise HarnessError(f"asked for {self.key['model']}, answered by {', '.join(trial.models)} — not recorded")
+        self.pending[arm].append(trial.passed)
+        self._keep(arm, len(self.pending[arm]), trial)
+        self._write()
+
+    def abort(self, arm: str, reason: str) -> None:
+        self.pending["aborted"].append({"arm": arm, "trial": len(self.pending[arm]) + 1, "reason": reason})
+        self._write()
+
+    def close(self) -> Path:
+        """Close the run once both arms are complete, and judge every trial the record holds."""
+        if any(self.remaining(arm) for arm in ARMS):
+            raise HarnessError(f"{self.scenario.name}: the run is not complete — it cannot be closed")
+        run = {
+            "at": self.pending["at"],
+            "trials": self.scenario.trials,
+            **{arm: sum(self.pending[arm]) for arm in ARMS},
+        }
+        if self.pending["aborted"]:
+            run["aborted"] = self.pending["aborted"]
+        self.runs.append(run)
+        self.pending = {}
+        self._write()
+        prune()
+        return self.path
+
+    def _keep(self, arm: str, number: int, trial: Trial) -> None:
+        folder = transcripts_path(self.scenario.name, self.key["model"])
+        (folder / f"run-{len(self.runs) + 1}").mkdir(parents=True, exist_ok=True)
+        (folder / "key.json").write_text(json.dumps(self.key, indent=2) + "\n", encoding="utf-8")
+        stem = folder / f"run-{len(self.runs) + 1}" / f"{arm}-{number}"
+        stem.with_suffix(".jsonl").write_text(trial.output, encoding="utf-8")
+        score = {"passed": trial.passed, "calls": trial.calls}
+        stem.with_suffix(".json").write_text(json.dumps(score, indent=2) + "\n", encoding="utf-8")
+
+    def _write(self) -> None:
+        document: dict[str, Any] = {
+            "scenario": self.scenario.name,
+            "guard": {
+                "file": self.scenario.guard.file,
+                "section": self.scenario.guard.section,
+                "cr": self.scenario.guard.cr,
+            },
+            **self.key,
+            "runs": self.runs,
+        }
+        if self.runs:
+            trials = sum(r["trials"] for r in self.runs)
+            passed = {arm: sum(r[arm] for r in self.runs) for arm in ARMS}
+            p, verdict = judge(passed["with"], passed["without"], trials, len(self.runs))
+            document.update(trials=trials, passed=passed, p=round(p, 4), verdict=verdict)
+        else:
+            document.update(trials=0, passed=dict.fromkeys(ARMS, 0), p=None, verdict="undecided")
+        if self.pending:
+            document["pending"] = self.pending
+        RESULTS.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def evaluate(
-    scenario: Scenario, launch: Callable[[Path, list[str], float], Launched], *, model: str, timeout: float
-) -> dict[str, Any]:
-    outcome: dict[str, Any] = {}
-    trials = scenario.trials
+    scenario: Scenario,
+    run_key: dict[str, Any],
+    launch: Callable[[Path, list[str], float], Launched],
+    *,
+    timeout: float,
+) -> Path:
+    """Fill the key's run to the scenario's `trials` per arm, writing each trial as it ends, and close it."""
+    ledger = Ledger(scenario, run_key)
     for arm in ARMS:
-        done: list[Trial] = []
-        for number in range(1, trials + 1):
-            done.append(run_arm(scenario, arm, launch, timeout, model))
-            said = "yes" if done[-1].passed else "no"
-            print(f"  {scenario.name} [{arm}] trial {number}/{trials}: {said}", flush=True)
-        digests = {t.digest for t in done}
-        if len(digests) != 1:
-            raise HarnessError(f"{scenario.name} [{arm}]: the prompt differed between trials")
-        outcome[arm] = {
-            "passed": sum(t.passed for t in done),
-            "digest": digests.pop(),
-            "models": sorted({m for t in done for m in t.models}),
-            "trials": [{"passed": t.passed, "calls": t.calls, "output": t.output} for t in done],
-        }
-    return outcome
+        while ledger.remaining(arm):
+            number = scenario.trials - ledger.remaining(arm) + 1
+            try:
+                trial = run_arm(scenario, arm, launch, timeout, run_key["model"])
+                ledger.add(arm, trial)
+            except (Exception, KeyboardInterrupt) as exc:
+                # Written, then raised: the run stops here and the next one resumes at this trial.
+                ledger.abort(arm, (str(exc).splitlines() or [type(exc).__name__])[0])
+                raise
+            said = "yes" if trial.passed else "no"
+            print(f"  {scenario.name} [{arm}] trial {number}/{scenario.trials}: {said}", flush=True)
+    return ledger.close()
 
 
 def _profile(name: str) -> models.ExecutorProfile:
@@ -552,9 +597,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_key = key(
                 scenario, model=args.model, cli=cli, where=place, digests=current_digests(scenario, args.model)
             )
-            prior(scenario, run_key)  # refuses a decided key before anything is launched
-            outcome = evaluate(scenario, launch, model=args.model, timeout=args.timeout)
-            path = record(scenario, run_key, outcome)
+            path = evaluate(scenario, run_key, launch, timeout=args.timeout)
             document = json.loads(path.read_text(encoding="utf-8"))
             counts = ", ".join(f"{arm} {document['passed'][arm]}/{document['trials']}" for arm in ARMS)
             print(f"{name}: {counts}, p {document['p']}: {document['verdict']} → {path.relative_to(ROOT)}")

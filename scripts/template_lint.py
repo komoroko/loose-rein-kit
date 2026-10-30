@@ -503,6 +503,9 @@ def eval_records(root: Path) -> tuple[dict[str, list[str]], list[str]]:
                 f"{where}: what {name} hands the agent changed since it was measured — run it again or delete it"
             )
             continue
+        if document.get("pending"):
+            failures.append(f"{where}: a run of {name} stopped part-way — run it again to finish it (devr 論点 X)")
+            continue
         verdicts.setdefault(name, []).append(str(document.get("verdict")))
     return verdicts, failures
 

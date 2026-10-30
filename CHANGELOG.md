@@ -14,7 +14,7 @@ gains a sub-issue's `unbundled`, the event log gains `bundle_landed`, `bundle_sp
 `decision_overruled`, `finding_observed` and `observation_repaired`, `review.yaml`'s machine half
 gains `local_decisions` and `observations`, and `config.yaml` gains `project.language`. **`rein
 decision add` no longer takes `--risk`** and requires `--rationale`, `--undo` and `--anchor`.
-Twenty-two change requests (CR-81 to CR-102).
+Twenty-three change requests (CR-81 to CR-103).
 
 - **The plan has two levels: issues, and the sub-issues a human approves (CR-81).** A sub-issue is
   what a task was, less its place in the DAG: scope, criteria, claims and irreversible declarations,
@@ -63,7 +63,7 @@ Twenty-two change requests (CR-81 to CR-102).
   typing. Conversation stays in the person's language, and what the code prints stays English. **A
   repository that wrote its documents in another language reads `en` once it upgrades**: set
   `project.language: ja` (or its tag) in `config.yaml`.
-- **The sentences rein hands an agent are tested against a control (CR-88, CR-89, CR-94 to CR-102).**
+- **The sentences rein hands an agent are tested against a control (CR-88, CR-89, CR-94 to CR-103).**
   `evals/` holds behaviour tests: each scenario builds a repository, hands a real agent CLI the prompt
   rein would, and reads what the launch left — the `rein` calls a stub on PATH records, the files, the
   findings file — never a model's opinion of it. It runs in two arms, with and without the one sentence
@@ -76,7 +76,12 @@ Twenty-two change requests (CR-81 to CR-102).
   **The arms are judged by a one-sided Fisher exact test**, at 0.025 on each of at most two looks. A
   run adds the scenario's own five trials per arm to the record of the same key instead of replacing
   it, `--trials` is gone, and a key with a verdict (`holds`, `not-reproduced`, `does-not-hold`) is not
-  run again: more trials would be choosing a sample.
+  run again: more trials would be choosing a sample. **A run that stops keeps what it took**: each
+  trial is written to the record's `pending` as it ends, a launch that fails or an interrupt is
+  written to `aborted` with its arm before the run stops, and the next run of the same key fills the
+  rest instead of starting over. Before, a usage limit or a timeout threw away every trial of the
+  run, and stopping a run and starting it again drew those trials afresh. A record with a `pending`
+  run is refused by `template_lint` until it is finished.
   **`evals/inventory.yaml` names what holds each instruction.** A section is `unverified`, `none` (it
   asks an agent for nothing), or a list of `held` sentences, each `by` a scenario whose every record
   `holds` or by a unit test (`tests/<file>::<function>`) showing the code refuse the violation, with a
