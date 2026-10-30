@@ -14,7 +14,7 @@ gains a sub-issue's `unbundled`, the event log gains `bundle_landed`, `bundle_sp
 `decision_overruled`, `finding_observed` and `observation_repaired`, `review.yaml`'s machine half
 gains `local_decisions` and `observations`, and `config.yaml` gains `project.language`. **`rein
 decision add` no longer takes `--risk`** and requires `--rationale`, `--undo` and `--anchor`.
-Thirteen change requests (CR-81 to CR-93).
+Twenty-two change requests (CR-81 to CR-102).
 
 - **The plan has two levels: issues, and the sub-issues a human approves (CR-81).** A sub-issue is
   what a task was, less its place in the DAG: scope, criteria, claims and irreversible declarations,
@@ -63,7 +63,7 @@ Thirteen change requests (CR-81 to CR-93).
   typing. Conversation stays in the person's language, and what the code prints stays English. **A
   repository that wrote its documents in another language reads `en` once it upgrades**: set
   `project.language: ja` (or its tag) in `config.yaml`.
-- **The sentences rein hands an agent are tested against a control (CR-88, CR-89, CR-94 to CR-100).**
+- **The sentences rein hands an agent are tested against a control (CR-88, CR-89, CR-94 to CR-102).**
   `evals/` holds behaviour tests: each scenario builds a repository, hands a real agent CLI the prompt
   rein would, and reads what the launch left — the `rein` calls a stub on PATH records, the files, the
   findings file — never a model's opinion of it. It runs in two arms, with and without the one sentence
@@ -88,18 +88,23 @@ Thirteen change requests (CR-81 to CR-93).
   scored as the sentence failing. **Each trial's transcript is kept** under `evals/transcripts/`
   (not committed), with its score and its `rein` calls, for as long as the record it counts in; the
   CLI no longer keeps a copy of its own. The stub is allowed under every name it answers to: an agent
-  that called `.evalbin/rein` by path was refused, and its report counted as none.
-  Every record was measured again on isolated launches. Four scenarios hold on `claude-opus-5-5`: a
-  reviewer of a sound change writes an empty list (5/5 against 1/5), a confirming reader closes a
-  correct fix (4/5 against 0/5), a resolver of two tasks that cannot both hold reports
-  `needs-revision` (5/5 against 0/5), and a repairer fixes the cause rather than the line the finding
-  named (5/5 against 0/5). The sentence telling an implementer to report a criterion that needs a path
+  that called `.evalbin/rein` by path was refused, and its report counted as none. **The harness's
+  allowlist lets a launch read a change and run its gate**: with the operator's permission mode out,
+  it was all a launch got, and trials refused a `git ls-tree`, a `git -C <the trial>` or the
+  scenario's `python -m pytest` were scored against the sentence. Read-only git verbs, each git verb
+  the list allows against the trial's repository by its path (never `-C` alone), the gate, and
+  `head`, `tail`, `wc`, `echo` and `which` are allowed now.
+  Every record was measured again on isolated launches with that allowlist. Four scenarios hold on
+  `claude-opus-5-5`: a reviewer of a sound change writes an empty list (5/5 against 1/5), a
+  confirming reader closes a correct fix (5/5 against 0/5), a resolver of two tasks that cannot both
+  hold reports `needs-revision` (5/5 against 0/5), and a repairer fixes the cause rather than the line
+  the finding named (5/5 against 0/5). The sentence telling an implementer to report a criterion that needs a path
   outside its scope before doing the work is gone from `implementer.md`, with its scenario: without
   it, agents reported `needs-revision` every time, whether the path was in the criterion's own words
   or implied by the test file its check runs. The rest of the document already says a scope change
-  is a human's. A sentence on recording an open choice, which passed as often without it, is gone
-  too. With the operator's permission mode out, the harness's own allowlist is what a launch gets:
-  some trials were refused a `git ls-tree` or a test run that `rein build` would allow.
+  is a human's. The sentence telling an implementer to make, record and go on with a choice the
+  ticket leaves open stays gone: measured again on isolated launches, agents recorded the choice and
+  went on in every trial without it (5/5 against 4/5 with it).
   `implementer.md` also said a run that ends without `rein report` is treated as a failed attempt. It
   is judged on its diff: an empty one fails, any other goes to the gate. The sentence says so now.
 - **What an implementer decides is sorted by what overruling it would move, not by how much it

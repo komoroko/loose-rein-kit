@@ -88,9 +88,16 @@ ALPHA = 0.025
 LOOKS = 2
 VERDICTS = ("holds", "not-reproduced", "undecided", "does-not-hold")
 
+#: The git verbs a launch may run, plain or as `git -C <the trial's repository>`: reading, and the
+#: two a repair commits with. Not `-C` alone, which would let any verb through.
+GIT = ("diff", "log", "status", "show", "ls-tree", "grep", "cat-file", "rev-parse", "add", "commit")
+#: The quality gate every scenario's prompt names, which the agent is told to run.
+GATE = "python -m pytest"
 #: The tools a scenario's launch may use without asking. A headless `-p` launch cannot answer a
 #: permission prompt, so anything not named here is refused — which is what keeps a scenario to
-#: what it says it exercises.
+#: what it says it exercises. A refusal falls on whichever arm meets it, so what a reviewer or an
+#: implementer needs to read a change and run its gate is allowed: when it was not, refused trials
+#: were scored as the sentence failing.
 ALLOWED = (
     "Read",
     "Edit",
@@ -98,14 +105,15 @@ ALLOWED = (
     "Glob",
     "Grep",
     "Bash(rein:*)",
-    "Bash(git diff:*)",
-    "Bash(git log:*)",
-    "Bash(git status:*)",
-    "Bash(git show:*)",
-    "Bash(git add:*)",
-    "Bash(git commit:*)",
+    *(f"Bash(git {verb}:*)" for verb in GIT),
+    f"Bash({GATE}:*)",
     "Bash(ls:*)",
     "Bash(cat:*)",
+    "Bash(head:*)",
+    "Bash(tail:*)",
+    "Bash(wc:*)",
+    "Bash(echo:*)",
+    "Bash(which:*)",
 )
 
 _STUB = """#!/bin/sh
@@ -216,10 +224,12 @@ ISOLATION = (
 
 def command(prompt: str, model: str, root: Path) -> list[str]:
     """`rein` is allowed under every name the stub answers to: an agent that ran `which rein` and
-    called the path it printed was refused, and a correct report was scored as no report."""
+    called the path it printed was refused, and a correct report was scored as no report. `GIT` is
+    allowed against the trial's repository by its path as well."""
     claude = adapters.ADAPTER_TABLE["claude"]
     stub = [f"Bash({name}:*)" for name in (".evalbin/rein", "./.evalbin/rein", f"{root}/.evalbin/rein")]
-    settings = json.dumps({"permissions": {"allow": [*ALLOWED, *stub]}})
+    there = [f"Bash(git -C {root} {verb}:*)" for verb in GIT]
+    settings = json.dumps({"permissions": {"allow": [*ALLOWED, *stub, *there]}})
     return [
         *claude.argv,
         *ISOLATION,

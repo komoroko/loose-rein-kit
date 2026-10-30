@@ -8,14 +8,14 @@
   "model": "claude-opus-5-5",
   "cli": "2.1.314 (Claude Code)",
   "where": "host",
-  "scenario_digest": "sha256:b5bce708df002fc04b348485f3124f842d152e77c10572e815b3d322c3b70176",
+  "scenario_digest": "sha256:31af6bca934df338337f99ff4576e2f0d0084163304970071bc7133f1270ba64",
   "launch_digests": {
-    "with": "sha256:ebb92c8ebc9503c43a48363241402b34a5f582f62529a355588ce7c751294470",
-    "without": "sha256:a548ac690c905ce47abf3f6c69966e0e4b849aaa3a13ef72eff86dc8b768ecf1"
+    "with": "sha256:440a3d441bf68d027eddbfeb21199245abe2c3b71ff1d47bdeb733d0e0167654",
+    "without": "sha256:a8b4f80205d88bf6a91705b3d6831864d0d1a79313c565d3cdb7253248ce14b7"
   },
   "runs": [
     {
-      "at": "2026-10-30T11:17:26+00:00",
+      "at": "2026-10-30T18:05:28+00:00",
       "trials": 5,
       "with": 5,
       "without": 0

@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from evals.harness import Guard, Scenario, git
+from evals.harness import GATE, Guard, Scenario, git
 from evals.scenarios import _fixtures
 from rein import build_prompts, dag
 
@@ -78,7 +78,7 @@ def control(root: Path) -> str:
     return str(
         build_prompts.batch_review_prompt(
             [build_prompts.ReviewSubject(TASK, "build/T-001", "git diff main...build/T-001", ".rein/work/T-001.json")],
-            gate_cmds=["python -m pytest"],
+            gate_cmds=[GATE],
             findings_path=str(root / ANSWER),
             reviews=("adversarial",),
             questions={},

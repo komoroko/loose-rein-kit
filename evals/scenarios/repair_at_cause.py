@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from evals.harness import Guard, Scenario, git
+from evals.harness import GATE, Guard, Scenario, git
 from rein import build_prompts, dag
 
 UNITS = '''def to_seconds(ms):
@@ -65,7 +65,7 @@ def fixture(root: Path) -> None:
 
 
 def prompt(root: Path) -> str:
-    return str(build_prompts.gate_four_fix_prompt(TASK, FINDINGS, gate_cmds=["python -m pytest"]))
+    return str(build_prompts.gate_four_fix_prompt(TASK, FINDINGS, gate_cmds=[GATE]))
 
 
 def score(root: Path, calls: list[list[str]]) -> bool:

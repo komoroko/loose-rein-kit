@@ -11,7 +11,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from evals.harness import Guard, Scenario, git
+from evals.harness import GATE, Guard, Scenario, git
 from rein import build_prompts, dag
 
 FAST = dag.Task(
@@ -68,7 +68,7 @@ def fixture(root: Path) -> None:
 
 
 def prompt(root: Path) -> str:
-    return str(build_prompts.conflict_prompt(FAST, UPLOAD, ["src/client.py"], gate_cmds=["python -m pytest"]))
+    return str(build_prompts.conflict_prompt(FAST, UPLOAD, ["src/client.py"], gate_cmds=[GATE]))
 
 
 def score(root: Path, calls: list[list[str]]) -> bool:

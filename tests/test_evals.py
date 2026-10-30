@@ -358,7 +358,7 @@ def test_a_record_of_the_launch_as_it_ships_is_read_for_its_verdict(
     [
         ({"launch_digests": {"with": "sha256:old", "without": "sha256:old"}}, "hands the agent changed"),
         ({"scenario_digest": "sha256:old"}, "or its fixtures changed"),
-        ({"scenario": "local_decision"}, "no longer exists"),
+        ({"scenario": "gone"}, "no longer exists"),
     ],
 )
 def test_a_record_of_a_launch_that_no_longer_ships_is_refused(
@@ -397,6 +397,19 @@ def test_the_stub_is_allowed_under_every_name_it_answers_to() -> None:
     allowed = json.loads(argv[argv.index("--settings") + 1])["permissions"]["allow"]
     for name in ("rein", ".evalbin/rein", "./.evalbin/rein", "/r/.evalbin/rein"):
         assert f"Bash({name}:*)" in allowed, name
+
+
+def test_a_launch_may_read_git_and_run_its_gate() -> None:
+    """Read-only git verbs, `git -C <the trial>` and the gate were refused: a reviewer that could
+    not list the fix's branch reported nothing, and that was scored against the sentence."""
+    argv = harness.command("p", "m", Path("/r"))
+    allowed = json.loads(argv[argv.index("--settings") + 1])["permissions"]["allow"]
+    for verb in ("ls-tree", "grep", "show", "commit"):
+        assert f"Bash(git {verb}:*)" in allowed, verb
+        assert f"Bash(git -C /r {verb}:*)" in allowed, verb
+    assert f"Bash({harness.GATE}:*)" in allowed
+    for refused in ("git stash", "git -C /r", "git push", "python3", "sed", "mkdir"):
+        assert f"Bash({refused}:*)" not in allowed, refused
 
 
 def test_the_stream_is_read_for_the_model_that_answered_and_one_without_a_close_is_refused() -> None:
