@@ -14,7 +14,7 @@ gains a sub-issue's `unbundled`, the event log gains `bundle_landed`, `bundle_sp
 `decision_overruled`, `finding_observed` and `observation_repaired`, `review.yaml`'s machine half
 gains `local_decisions` and `observations`, and `config.yaml` gains `project.language`. **`rein
 decision add` no longer takes `--risk`** and requires `--rationale`, `--undo` and `--anchor`.
-Twenty-three change requests (CR-81 to CR-103).
+Twenty-five change requests (CR-81 to CR-105).
 
 - **The plan has two levels: issues, and the sub-issues a human approves (CR-81).** A sub-issue is
   what a task was, less its place in the DAG: scope, criteria, claims and irreversible declarations,
@@ -24,14 +24,17 @@ Twenty-three change requests (CR-81 to CR-103).
   to write instead. Sub-issue ids stay `T-NNN`, and so do their tickets and crossing gates. A ticket
   per issue was considered and not taken: a crossing binds its ticket's digest, and a shared document
   would have asked for that approval again whenever a sibling's section moved.
-- **The loop decides how an issue's sub-issues share a launch (CR-82).** A *bundle* is a contiguous
-  run of one issue's sub-issues, in plan order, that are `todo` and wait on nothing outside it that is
-  not done: one worktree, one implementer launch, one gate over all their criteria, one commit. Never
-  bundled: a sub-issue that crosses an irreversible point, has `operate` or `requires`, is produced
-  by a person, or was split from a bundle before. Grouping changes nothing anybody approved, so it is
-  not frozen and moves no gate. The implementer is handed every member's ticket; each member's
-  criteria are named `T-NNN/A-n` inside the bundle and come back under their own ids when it lands,
-  and `bundle_landed` records which sub-issues one commit carries.
+- **The loop decides how an issue's sub-issues share a launch (CR-82, CR-104).** A *bundle* is a
+  contiguous run of one issue's sub-issues, in plan order, that are `todo`, are not carried by
+  another launch of the same batch, and wait on nothing outside it that is not done: one worktree,
+  one implementer launch, one gate over all their criteria, one commit. A batch runs in frontier
+  order, not plan order, and a lead earlier in the plan once took siblings a later lead had already
+  taken, launching them twice. Never bundled: a sub-issue that crosses an irreversible point, has
+  `operate` or `requires`, is produced by a person, or was split from a bundle before. Grouping
+  changes nothing anybody approved, so it is not frozen and moves no gate. The implementer is handed
+  every member's ticket; each member's criteria are named `T-NNN/A-n` inside the bundle and come
+  back under their own ids when it lands, and `bundle_landed` records which sub-issues one commit
+  carries.
 - **A bundle that does not land is split, not judged (CR-83).** A red gate, a refusal before it, a
   merge that will not go, or a red join sends every member back to `todo` with `unbundled` saying
   why; none is `blocked`, and the lead's handoff goes with the bundle, so a fresh launch at it alone
@@ -63,16 +66,17 @@ Twenty-three change requests (CR-81 to CR-103).
   typing. Conversation stays in the person's language, and what the code prints stays English. **A
   repository that wrote its documents in another language reads `en` once it upgrades**: set
   `project.language: ja` (or its tag) in `config.yaml`.
-- **The sentences rein hands an agent are tested against a control (CR-88, CR-89, CR-94 to CR-103).**
+- **The sentences rein hands an agent are tested against a control (CR-88, CR-89, CR-94 to CR-105).**
   `evals/` holds behaviour tests: each scenario builds a repository, hands a real agent CLI the prompt
   rein would, and reads what the launch left — the `rein` calls a stub on PATH records, the files, the
   findings file — never a model's opinion of it. It runs in two arms, with and without the one sentence
   it guards. `make eval EVAL_WHERE="--host" EVAL_MODEL=<model>` (or `--profile <oci-agent profile>`)
   runs them; they are not part of `check` or CI.
-  **A record is about the launch it measured.** Its key is each arm's launch digest (the command, the
-  prompt and every file of the repository handed over), the scenario's digest (its fixture and its
-  score), the model, the CLI's version and where it ran, and `template_lint` rebuilds the launches
-  without running them and refuses a record that no longer matches, or whose scenario is gone.
+  **A record is about the launch it measured.** Its key is each arm's launch digest (the command,
+  the prompt and every file of the repository handed over), the scenario's digest (its fixture and
+  its score), the model, the CLI's version, where it ran and `--timeout`, and `template_lint`
+  rebuilds the launches without running them and refuses a record that no longer matches, or whose
+  scenario is gone.
   **The arms are judged by a one-sided Fisher exact test**, at 0.025 on each of at most two looks. A
   run adds the scenario's own five trials per arm to the record of the same key instead of replacing
   it, `--trials` is gone, and a key with a verdict (`holds`, `not-reproduced`, `does-not-hold`) is not
@@ -80,8 +84,11 @@ Twenty-three change requests (CR-81 to CR-103).
   trial is written to the record's `pending` as it ends, a launch that fails or an interrupt is
   written to `aborted` with its arm before the run stops, and the next run of the same key fills the
   rest instead of starting over. Before, a usage limit or a timeout threw away every trial of the
-  run, and stopping a run and starting it again drew those trials afresh. A record with a `pending`
-  run is refused by `template_lint` until it is finished.
+  run, and stopping a run and starting it again drew those trials afresh. A launch that runs past
+  `--timeout` is a trial, scored on what it left by then and named in `timed_out`: running long is
+  something an arm does, and drawing it again until it finished in time would choose the sample. The
+  record is written beside itself and moved over, so an interrupt mid-write keeps the record it had.
+  A record with a `pending` run, or with a key that lacks a field, is refused by `template_lint`.
   **`evals/inventory.yaml` names what holds each instruction.** A section is `unverified`, `none` (it
   asks an agent for nothing), or a list of `held` sentences, each `by` a scenario whose every record
   `holds` or by a unit test (`tests/<file>::<function>`) showing the code refuse the violation, with a
@@ -99,17 +106,18 @@ Twenty-three change requests (CR-81 to CR-103).
   scenario's `python -m pytest` were scored against the sentence. Read-only git verbs, each git verb
   the list allows against the trial's repository by its path (never `-C` alone), the gate, and
   `head`, `tail`, `wc`, `echo` and `which` are allowed now.
-  Every record was measured again on isolated launches with that allowlist. Four scenarios hold on
-  `claude-opus-5-5`: a reviewer of a sound change writes an empty list (5/5 against 1/5), a
-  confirming reader closes a correct fix (5/5 against 0/5), a resolver of two tasks that cannot both
-  hold reports `needs-revision` (5/5 against 0/5), and a repairer fixes the cause rather than the line
-  the finding named (5/5 against 0/5). The sentence telling an implementer to report a criterion that needs a path
-  outside its scope before doing the work is gone from `implementer.md`, with its scenario: without
-  it, agents reported `needs-revision` every time, whether the path was in the criterion's own words
-  or implied by the test file its check runs. The rest of the document already says a scope change
-  is a human's. The sentence telling an implementer to make, record and go on with a choice the
-  ticket leaves open stays gone: measured again on isolated launches, agents recorded the choice and
-  went on in every trial without it (5/5 against 4/5 with it).
+  Every record was measured again on isolated launches with that allowlist, under a key that holds
+  `--timeout` (900 seconds; no launch ran past it). Four scenarios hold on `claude-opus-5-5`: a
+  reviewer of a sound change writes an empty list, a confirming reader closes a correct fix, a
+  resolver of two tasks that cannot both hold reports `needs-revision`, and a repairer fixes the
+  cause rather than the line the finding named, each 5/5 against 0/5. The sentence telling an
+  implementer to report a criterion that needs a path outside its scope before doing the work is
+  gone from `implementer.md`, with its scenario: without it, agents reported `needs-revision` every
+  time, whether the path was in the criterion's own words or implied by the test file its check
+  runs. The rest of the document already says a scope change is a human's. The sentence telling an
+  implementer to make, record and go on with a choice the ticket leaves open stays gone: measured
+  again on isolated launches, agents recorded the choice and went on in every trial without it (5/5
+  against 4/5 with it).
   `implementer.md` also said a run that ends without `rein report` is treated as a failed attempt. It
   is judged on its diff: an empty one fails, any other goes to the gate. The sentence says so now.
 - **What an implementer decides is sorted by what overruling it would move, not by how much it

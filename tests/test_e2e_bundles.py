@@ -202,6 +202,16 @@ def test_a_done_sibling_is_passed_over_and_an_unmet_edge_or_another_environment_
     assert dag.bundle(graph, graph.get("T-004")).members == (), "T-005 waits on work outside the bundle"
 
 
+def test_a_sub_issue_another_launch_of_the_batch_took_is_not_launched_again() -> None:
+    # The batch runs in frontier order — fan-out first — not in plan order: T-002 leads, and
+    # T-001, which comes before it in the plan, would otherwise take T-002 and T-003 a second time.
+    graph = dag.Graph.from_tasks([_t("T-001"), _t("T-002"), _t("T-003", blocked_by=("T-002",))])
+    batch = build_loop.plan_batch(graph, 4)
+    assert batch is not None and [t.id for t in batch[1]] == ["T-002", "T-001"]
+    launches = build_loop.Orchestrator._bundled(graph, batch[1])
+    assert [build_loop.Orchestrator._carried(t) for t in launches] == [("T-002", "T-003"), ("T-001",)]
+
+
 @pytest.mark.parametrize(
     "why, field",
     [

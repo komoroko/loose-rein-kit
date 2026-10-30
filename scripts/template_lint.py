@@ -492,6 +492,9 @@ def eval_records(root: Path) -> tuple[dict[str, list[str]], list[str]]:
             failures.append(f"{where}: scenario {name!r} no longer exists — delete the record")
             continue
         scenario = harness.load(name)
+        if missing := [k for k in harness.KEY_FIELDS if k not in document]:
+            failures.append(f"{where}: its key has no {', '.join(missing)} — run it again or delete it")
+            continue
         if document.get("scenario_digest") != harness.scenario_digest(name):
             failures.append(
                 f"{where}: evals/scenarios/{name}.py or its fixtures changed since it was measured — "

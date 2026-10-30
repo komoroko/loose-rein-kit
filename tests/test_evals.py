@@ -40,7 +40,12 @@ def test_a_sentence_not_in_the_prompt_exactly_once_leaves_no_control(prompt: str
 
 def _key(scenario: harness.Scenario, model: str = "m", cli: str = "2.1") -> dict[str, object]:
     return harness.key(
-        scenario, model=model, cli=cli, where="host", digests={"with": "sha256:a", "without": "sha256:b"}
+        scenario,
+        model=model,
+        cli=cli,
+        where="host",
+        timeout=900.0,
+        digests={"with": "sha256:a", "without": "sha256:b"},
     )
 
 
@@ -332,15 +337,21 @@ def test_a_section_is_read_whitespace_folded_and_a_prompt_function_by_its_litera
 # --- the records -----------------------------------------------------------------------
 
 
+#: A `_live_record` change that takes the field out of the record.
+_DROP = object()
+
+
 def _live_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **change: object) -> list[str]:
     monkeypatch.setattr(harness, "RESULTS", tmp_path)
     monkeypatch.setattr(harness, "TRANSCRIPTS", tmp_path / "transcripts")
     scenario = harness.load("review_empty")
     digests = harness.current_digests(scenario, "m")
-    run_key = harness.key(scenario, model="m", cli="2.1", where="host", digests=digests)
+    run_key = harness.key(scenario, model="m", cli="2.1", where="host", timeout=900.0, digests=digests)
     path = _run(scenario, run_key, 5, 0)
     document = json.loads(path.read_text(encoding="utf-8"))
     document.update(change)
+    for name in [k for k, v in change.items() if v is _DROP]:
+        del document[name]
     path.write_text(json.dumps(document), encoding="utf-8")
     verdicts, failures = template_lint.eval_records(_ROOT)
     assert not failures or verdicts == {}
@@ -361,7 +372,8 @@ def test_a_record_of_the_launch_as_it_ships_is_read_for_its_verdict(
         ({"launch_digests": {"with": "sha256:old", "without": "sha256:old"}}, "hands the agent changed"),
         ({"scenario_digest": "sha256:old"}, "or its fixtures changed"),
         ({"scenario": "gone"}, "no longer exists"),
-        ({"pending": {"at": "t", "with": [True], "without": [], "aborted": []}}, "stopped part-way"),
+        ({"timeout": _DROP}, "its key has no timeout"),
+        ({"pending": {"at": "t", "with": [True], "without": [], "aborted": [], "timed_out": []}}, "stopped part-way"),
     ],
 )
 def test_a_record_of_a_launch_that_no_longer_ships_is_refused(
@@ -458,7 +470,9 @@ def test_a_stopped_run_keeps_its_trials_and_the_next_run_of_the_key_fills_the_re
     """A usage limit stopped a run in its second arm, and every trial it had taken was thrown away:
     a run that can be stopped and started again draws again whatever it had seen."""
     scenario = harness.load("review_empty")
-    run_key = harness.key(scenario, model="m", cli="2.1", where="host", digests=harness.current_digests(scenario, "m"))
+    run_key = harness.key(
+        scenario, model="m", cli="2.1", where="host", timeout=1.0, digests=harness.current_digests(scenario, "m")
+    )
     launched: list[str] = []
 
     def limited(root: Path, argv: list[str], timeout: float) -> harness.Launched:
@@ -485,3 +499,56 @@ def test_a_stopped_run_keeps_its_trials_and_the_next_run_of_the_key_fills_the_re
     assert "pending" not in closed and len(closed["runs"]) == 1 and closed["trials"] == 5
     assert closed["runs"][0]["aborted"] == stopped["pending"]["aborted"]
     assert len(list((stores / "transcripts" / "review_empty.m" / "run-1").glob("*.jsonl"))) == 10
+
+
+def test_a_launch_stopped_at_the_timeout_is_scored_on_what_it_left_and_not_drawn_again(
+    stores: Path, tmp_path: Path
+) -> None:
+    """A launch that ran past the timeout stopped the run, and the next run drew that trial again:
+    an arm that tends to run long was sampled until its launches finished in time."""
+    printed = json.dumps({"type": "assistant", "message": {"model": "m", "content": []}})
+    sleeper = [sys.executable, "-c", f"import sys, time; print({printed!r}, flush=True); time.sleep(30)"]
+    stopped = harness.launch_host(tmp_path, sleeper, 2.0)
+    assert stopped.timed_out and stopped.models == ("m",)
+
+    scenario = harness.load("review_empty")
+    run_key = harness.key(
+        scenario, model="m", cli="2.1", where="host", timeout=1.0, digests=harness.current_digests(scenario, "m")
+    )
+    launched: list[str] = []
+
+    def slow_without(root: Path, argv: list[str], timeout: float) -> harness.Launched:
+        launched.append(argv[-1])
+        return harness.Launched(0, "stream\n", ("m",), timed_out=len(launched) > 5)
+
+    path = harness.evaluate(scenario, run_key, slow_without, timeout=1.0)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert len(launched) == 10, "every trial was launched once"
+    assert record["runs"][0]["timed_out"] == [{"arm": "without", "trial": n} for n in range(1, 6)]
+    assert "aborted" not in record["runs"][0] and record["timeout"] == 1.0
+
+
+def test_a_run_interrupted_while_its_record_is_written_keeps_the_record_it_had(
+    stores: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record was rewritten in place: an interrupt between truncating and writing it left a file
+    the next run could not read, and every trial it held went with it."""
+    scenario = harness.load("review_empty")
+    ledger = harness.Ledger(scenario, _key(scenario))
+    ledger.add("with", _trial(True, "sha256:a"))
+    path = stores / "results" / "review_empty.m.json"
+    before = path.read_text(encoding="utf-8")
+    real = Path.write_text
+
+    def interrupted(self: Path, text: str, *args: Any, **kwargs: Any) -> int:
+        if self.parent == stores / "results":
+            real(self, "", encoding="utf-8")
+            raise KeyboardInterrupt
+        return real(self, text, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        ledger.add("with", _trial(True, "sha256:a", n=1))
+    monkeypatch.setattr(Path, "write_text", real)
+    assert path.read_text(encoding="utf-8") == before
+    assert harness.Ledger(scenario, _key(scenario)).remaining("with") == 4

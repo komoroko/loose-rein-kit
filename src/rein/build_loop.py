@@ -4757,19 +4757,21 @@ class Orchestrator:
         """The sub-issues one launch carries: a bundle's members, or the task itself."""
         return task.members or (task.id,)
 
-    def _bundled(self, graph: dag.Graph, tasks: Sequence[dag.Task]) -> list[dag.Task]:
+    @staticmethod
+    def _bundled(graph: dag.Graph, tasks: Sequence[dag.Task]) -> list[dag.Task]:
         """The batch as launches: each task with the siblings :func:`dag.bundle` puts in its launch.
 
-        A sibling a bundle already took leaves the batch, so no sub-issue is launched twice.
+        A sibling a bundle already took leaves the batch, and no later bundle takes it again, so no
+        sub-issue is launched twice.
         """
         launches: list[dag.Task] = []
         taken: set[str] = set()
         for task in tasks:
             if task.id in taken:
                 continue
-            launch = dag.bundle(graph, graph.get(task.id))
+            launch = dag.bundle(graph, graph.get(task.id), taken)
             launches.append(launch)
-            taken.update(self._carried(launch))
+            taken.update(Orchestrator._carried(launch))
         return launches
 
     def _split_bundle(self, task: dag.Task, why: str) -> None:

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -470,14 +470,16 @@ def bundleable(task: Task) -> str:
     return ""
 
 
-def bundle(graph: Graph, lead: Task) -> Task:
+def bundle(graph: Graph, lead: Task, taken: Set[str] = frozenset()) -> Task:
     """`lead` and the sub-issues of its issue that follow it, as one launch — or `lead` alone.
 
     Deterministic from the graph: the plan's order, the statuses, and the split marks. Members are
     taken in plan order after `lead` while each is `todo`, may share a launch, runs in `lead`'s
     environment, and waits for nothing outside the bundle that is not done. The first sub-issue
     that fails any of those ends the bundle, so a bundle is always a contiguous run of its issue.
-    Done siblings are passed over: they are not work, and they do not break the run.
+    Done siblings are passed over: they are not work, and they do not break the run. A sibling in
+    `taken` — carried by another launch of the same batch — ends it too: a batch runs in frontier
+    order, not plan order, so a lead earlier in the plan can meet siblings a later one already took.
 
     The bundle is a :class:`Task` under `lead`'s id whose `members` names everything it carries.
     Its scope covers what any member's does, its criteria are every member's, named
@@ -493,6 +495,7 @@ def bundle(graph: Graph, lead: Task) -> Task:
             continue
         if (
             task.status != "todo"
+            or task.id in taken
             or bundleable(task)
             or (task.env, task.allow) != (lead.env, lead.allow)
             or not all(dep in ids or graph.get(dep).is_done for dep in task.blocked_by)

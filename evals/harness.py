@@ -33,20 +33,23 @@ administrator installed still apply, and are part of what `where` names.
 
 **A record is about the launch it measured (devr 論点 T).** Its key is each arm's launch digest —
 the command, the prompt and the repository the agent was handed — the scenario's own digest — its
-fixture and its score — the model, the CLI's version and where it ran. `template_lint` rebuilds the
-launches from the sources as they stand and refuses a record whose digests no longer match: a count
-measured on a prompt that has since changed is not evidence about the one that ships.
+fixture and its score — the model, the CLI's version, where it ran and how long a launch may run.
+`template_lint` rebuilds the launches from the sources as they stand and refuses a record whose
+digests no longer match: a count measured on a prompt that has since changed is not evidence about
+the one that ships.
 
 **Judged by the difference, and trials are added, never re-drawn.** Each run spends the scenario's
 own `trials` per arm. A run whose key matches the record adds to it rather than replacing it, so
-running again cannot discard the trials that came out the wrong way. Nor can stopping part-way:
-each trial is written as it ends, and the next run of the key fills the stopped one (`Ledger`,
-devr 論点 X). The arms are compared by a
-one-sided Fisher exact test at `ALPHA` per look, over at most `LOOKS` looks — two at 0.025 keep the
-whole under 0.05. The verdict is `holds`, `not-reproduced` (the arm without the sentence never
-failed: the scenario did not produce what the sentence prevents), `undecided` (look again) or
-`does-not-hold`; once one other than `undecided` is reached, the key is not run again. A record
-whose key differs replaces the last one for that scenario and model.
+running again cannot discard the trials that came out the wrong way. Nor can stopping part-way: each
+trial is written as it ends, and the next run of the key fills the stopped one (`Ledger`,
+devr 論点 X). A launch that runs past `--timeout` is a trial, scored on what it left by then: running
+long is something an arm does, and drawing it again until it finishes in time would choose the
+sample. The arms are compared by a one-sided Fisher exact test at `ALPHA` per look, over at most
+`LOOKS` looks — two at 0.025 keep the whole under 0.05. The verdict is `holds`, `not-reproduced`
+(the arm without the sentence never failed: the scenario did not produce what the sentence
+prevents), `undecided` (look again) or `does-not-hold`; once one other than `undecided` is reached,
+the key is not run again. A record whose key differs replaces the last one for that scenario and
+model.
 
 **The harness keeps each trial's transcript for as long as the record it counts in (devr 論点 V).**
 A count says how often an arm passed, not why a trial failed, and the score is code that can be
@@ -317,13 +320,19 @@ class Launched:
     rc: int
     output: str
     models: tuple[str, ...]
+    #: Stopped at the timeout. Not a failed launch: what it left is scored like any other's.
+    timed_out: bool = False
 
 
 def launch_host(root: Path, argv: list[str], timeout: float) -> Launched:
     env = {**os.environ, "PATH": f"{root / '.evalbin'}{os.pathsep}{os.environ.get('PATH', '')}"}
-    done = subprocess.run(
-        argv, cwd=root, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout
-    )
+    try:
+        done = subprocess.run(
+            argv, cwd=root, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as stopped:
+        printed = stopped.stdout or b""
+        return _read(0, printed.decode("utf-8", "replace") if isinstance(printed, bytes) else printed, timed_out=True)
     return _read(done.returncode, done.stdout + done.stderr if done.returncode else done.stdout)
 
 
@@ -339,13 +348,29 @@ def launch_contained(profile: models.ExecutorProfile) -> Callable[[Path, list[st
             timeout_sec=timeout,
         )
         result = executors.for_profile(profile).run(spec)
-        return _read(result.exit_code, result.output)
+        return _read(result.exit_code, result.output, timed_out=result.timed_out)
 
     return run
 
 
-def _read(rc: int, output: str) -> Launched:
-    """The stream's closing `result` event is the envelope `--output-format json` would have printed."""
+def _read(rc: int, output: str, *, timed_out: bool = False) -> Launched:
+    """The stream's closing `result` event is the envelope `--output-format json` would have printed.
+
+    A stream stopped at the timeout has no `result` event, and the models are read off the
+    assistant messages it did print. Its lines are read one by one and the ones that are not JSON
+    passed over: the kill cuts the last line short, and an executor appends its own note.
+    """
+    if timed_out:
+        answered: list[str] = []
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            message = event.get("message") if isinstance(event, dict) and event.get("type") == "assistant" else None
+            if isinstance(message, dict) and isinstance(message.get("model"), str):
+                answered.append(message["model"])
+        return Launched(rc, output, tuple(dict.fromkeys(answered)), timed_out=True)
     if rc != 0:
         return Launched(rc, output, ())
     events = [json.loads(line) for line in output.splitlines() if line.strip()]
@@ -365,6 +390,7 @@ class Trial:
     #: What the launch printed — its transcript — and what it called `rein` with.
     output: str
     calls: list[list[str]]
+    timed_out: bool = False
 
 
 def run_arm(
@@ -377,12 +403,12 @@ def run_arm(
         argv = stage(scenario, arm, root, model)
         digest = launch_digest(root, argv)
         launched = launch(root, argv, timeout)
-        if launched.rc != 0:
+        if launched.rc != 0 and not launched.timed_out:
             raise HarnessError(
                 f"{scenario.name} [{arm}]: the launch failed (rc {launched.rc}):\n{launched.output[-2000:]}"
             )
         made = calls(root)
-        return Trial(scenario.score(root, made), digest, launched.models, launched.output, made)
+        return Trial(scenario.score(root, made), digest, launched.models, launched.output, made, launched.timed_out)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -395,7 +421,9 @@ def record_path(name: str, model: str) -> Path:
     return RESULTS / f"{name}.{model}.json"
 
 
-def key(scenario: Scenario, *, model: str, cli: str, where: str, digests: dict[str, str]) -> dict[str, Any]:
+def key(
+    scenario: Scenario, *, model: str, cli: str, where: str, timeout: float, digests: dict[str, str]
+) -> dict[str, Any]:
     """What a record is about. Two runs with the same key measured the same thing, and add up."""
     if not cli:
         raise HarnessError("the CLI's version is unknown — the run cannot be recorded")
@@ -403,13 +431,19 @@ def key(scenario: Scenario, *, model: str, cli: str, where: str, digests: dict[s
         "model": model,
         "cli": cli,
         "where": where,
+        "timeout": timeout,
         "scenario_digest": scenario_digest(scenario.name),
         "launch_digests": {arm: digests[arm] for arm in ARMS},
     }
 
 
+#: What `key` returns, by name: a record without one of them was measured under another key.
+KEY_FIELDS = ("model", "cli", "where", "timeout", "scenario_digest", "launch_digests")
+
+
 def _key_of(document: dict[str, Any]) -> dict[str, Any]:
-    return {k: document[k] for k in ("model", "cli", "where", "scenario_digest", "launch_digests")}
+    """A record's key. A field it lacks is None, which no key has: the record is of another key."""
+    return {k: document.get(k) for k in KEY_FIELDS}
 
 
 def prior(scenario: Scenario, run_key: dict[str, Any]) -> dict[str, Any] | None:
@@ -455,8 +489,9 @@ class Ledger:
     an operator who interrupts — leaves its trials there, and the next run of the same key fills the
     rest rather than starting over: a trial that was taken is never drawn again. A launch that fails
     is not a trial, having nothing to score, but it is written to `aborted` before the run stops, so
-    a failure that falls on one arm is in the record. `template_lint` refuses a record with a
-    `pending` run: it is not a count yet.
+    a failure that falls on one arm is in the record. A launch stopped at the timeout is a trial,
+    and is named in `timed_out` beside its count. `template_lint` refuses a record with a `pending`
+    run: it is not a count yet.
     """
 
     def __init__(self, scenario: Scenario, run_key: dict[str, Any]) -> None:
@@ -476,6 +511,7 @@ class Ledger:
             "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             **{arm: [] for arm in ARMS},
             "aborted": [],
+            "timed_out": [],
         }
 
     def remaining(self, arm: str) -> int:
@@ -490,6 +526,8 @@ class Ledger:
         if set(trial.models) != {self.key["model"]}:
             raise HarnessError(f"asked for {self.key['model']}, answered by {', '.join(trial.models)} — not recorded")
         self.pending[arm].append(trial.passed)
+        if trial.timed_out:
+            self.pending["timed_out"].append({"arm": arm, "trial": len(self.pending[arm])})
         self._keep(arm, len(self.pending[arm]), trial)
         self._write()
 
@@ -506,8 +544,9 @@ class Ledger:
             "trials": self.scenario.trials,
             **{arm: sum(self.pending[arm]) for arm in ARMS},
         }
-        if self.pending["aborted"]:
-            run["aborted"] = self.pending["aborted"]
+        for named in ("aborted", "timed_out"):
+            if self.pending[named]:
+                run[named] = self.pending[named]
         self.runs.append(run)
         self.pending = {}
         self._write()
@@ -520,7 +559,7 @@ class Ledger:
         (folder / "key.json").write_text(json.dumps(self.key, indent=2) + "\n", encoding="utf-8")
         stem = folder / f"run-{len(self.runs) + 1}" / f"{arm}-{number}"
         stem.with_suffix(".jsonl").write_text(trial.output, encoding="utf-8")
-        score = {"passed": trial.passed, "calls": trial.calls}
+        score = {"passed": trial.passed, "timed_out": trial.timed_out, "calls": trial.calls}
         stem.with_suffix(".json").write_text(json.dumps(score, indent=2) + "\n", encoding="utf-8")
 
     def _write(self) -> None:
@@ -544,7 +583,11 @@ class Ledger:
         if self.pending:
             document["pending"] = self.pending
         RESULTS.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        # Written beside and moved over: a run interrupted mid-write keeps the record it had, rather
+        # than a truncated one the next run cannot read and every trial in it with it.
+        written = self.path.with_name(self.path.name + ".tmp")
+        written.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(written, self.path)
 
 
 def evaluate(
@@ -566,7 +609,7 @@ def evaluate(
                 # Written, then raised: the run stops here and the next one resumes at this trial.
                 ledger.abort(arm, (str(exc).splitlines() or [type(exc).__name__])[0])
                 raise
-            said = "yes" if trial.passed else "no"
+            said = ("yes" if trial.passed else "no") + (" (timed out)" if trial.timed_out else "")
             print(f"  {scenario.name} [{arm}] trial {number}/{scenario.trials}: {said}", flush=True)
     return ledger.close()
 
@@ -595,7 +638,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         for name in args.scenarios or names():
             scenario = load(name)
             run_key = key(
-                scenario, model=args.model, cli=cli, where=place, digests=current_digests(scenario, args.model)
+                scenario,
+                model=args.model,
+                cli=cli,
+                where=place,
+                timeout=args.timeout,
+                digests=current_digests(scenario, args.model),
             )
             path = evaluate(scenario, run_key, launch, timeout=args.timeout)
             document = json.loads(path.read_text(encoding="utf-8"))
