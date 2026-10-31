@@ -4,6 +4,52 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.17.0] - 2026-11-01
+
+**A minor release: the format moves to `rein-grounded-v15`.** `state.yaml`'s `handoff.last_agent`
+gains `transcript`; nothing else in a repository's documents changes shape, and `rein sync --force`
+is all a repository needs. Four change requests (CR-106 to CR-109).
+
+- **`/build` is what the lead does, not what the loop does (CR-107).** `build.md` was 406 lines,
+  most of them describing what `rein build` does in code, and the one reader it has is the lead
+  that runs `/build`: implementers and reviewers are handed what `build_prompts.py` builds. It now
+  says what the lead does — run `rein build`, wait for it, act on its exit code, publish a stack's
+  drafts and answer change requests once it is done — and nothing about the loop's internals, which
+  are in the code and in "How it works". Two instructions in it were addressed to roles that never
+  read it: filling a provisional `smoke.run` (an implementer's) and recording each code-stage lens
+  with `rein lens --record` (a reviewer's). Both are gone; nothing records a code-stage lens, which
+  devr carries as an open question.
+  Five of the lead's instructions that stayed were put to `claude-opus-5-5` against a control: do
+  not build a task by hand when `rein build` refuses, stop and report on exit `1`, do not re-run
+  the build to check on it, never run `pr-stack --push` for the human, and edit only the slice a
+  change request names. Each came out 5/5 with and 5/5 without, and again with the human pressing
+  for the shortcut, so all five are gone. The typed confirmation still holds `--push`.
+- **A command procedure fits what a compaction keeps (CR-108).** After a compaction Claude Code
+  re-attaches an invoked command's first 5,000 tokens and drops the rest, and these prompts measure
+  2.83 bytes a token on Opus 5.5 and Sonnet 5.5: `build.md` (32.8KB) and `tasks.md` (31.4KB,
+  10,602 tokens on Haiku 5.5) were each over twice that, so what a long session lost was the second
+  half — how to wait for the run and what each exit code asks, the plan's fields, the reviews before
+  the mandate, the gate itself.
+  `template_lint` refuses a command over 13,442 bytes, its Claude Code wrapper and its procedure
+  together — 5% under the line. What one step of `/tasks` needs — reconciling after a roll back, an
+  adopted repository, the plan's fields, the reviews before the mandate — moved word for word to
+  `.rein/prompts/reference/tasks-detail.md`, which `/tasks` reads at that step.
+- **Every agent launch's whole output is kept for its cycle (CR-109).** `handoff.last_agent` kept
+  the last 4,000 characters, and why a task went round five times was in the part before them. Each
+  launch `rein build` makes — retries and failures included — writes its whole output under
+  `.rein/work/launches/` before anything parses it, and `handoff.last_agent.transcript` names the
+  file. Their last reader is the retrospective `/verify` writes, so `cycle-close` removes them all
+  once the next cycle is open. Launches of `rein review generate` are not kept this way.
+- **A launch stopped at its timeout takes what it started with it (CR-106).** A behaviour-test
+  launch killed the CLI and left whatever the CLI had started, which went on changing the repository
+  the trial was scored on; it now runs in its own session and the timeout kills the group. The group
+  kill — `common.run`'s too, which `rein build` uses — also reaches every descendant that left the
+  group, read from `/proc` before the kill: Claude Code runs a `run_in_background` command in a
+  session of its own, so it outlived the kill, and one holding the output pipe kept the timeout from
+  returning until it ended by itself. A record write that is interrupted removes the copy it was writing. A launch the host
+  re-entered is read as one launch: an agent that starts a command in the background gets a second
+  turn and a second `result` event, and the harness refused that stream as broken.
+
 ## [0.16.0] - 2026-10-29
 
 **A minor release: the format moves to `rein-grounded-v14`, and there is no migration for a cycle in

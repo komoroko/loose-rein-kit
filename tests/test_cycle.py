@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -263,6 +264,23 @@ def test_close_archives_resets_and_records(tmp_path: Path) -> None:
     assert (tmp_path / "docs" / "10-requirements.md").exists()
 
 
+def test_close_removes_every_launch_it_kept(tmp_path: Path) -> None:
+    """Every launch's output is kept for diagnosis, and its last reader is the retrospective `/verify`
+    writes before the close. The close kept the cycle it closed, for a reader that had already been."""
+    finished_repo(tmp_path, git=True, events=chain("cycle_initialized"))
+    _git(tmp_path, "config", "user.email", "t@e.x")
+    _git(tmp_path, "config", "user.name", "T")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "baseline")
+    launches = tmp_path / ".rein" / "work" / "launches"
+    launches.mkdir(parents=True)
+    (launches / "0001-implementer-T-001.log").write_text("said\n", encoding="utf-8")
+
+    assert cycle.main(["--name", "payment", "--repo", str(tmp_path)]) == 0
+
+    assert not launches.exists()
+
+
 @pytest.mark.integration
 def test_a_copy_an_older_init_left_does_not_open_the_next_cycle(tmp_path: Path) -> None:
     """#115 end to end: `init` copied plan.yaml and review.yaml aside and `cycle-close` restored the
@@ -395,3 +413,15 @@ def test_an_accepted_cycle_is_not_closed_as_abandoned(tmp_path: Path) -> None:
     assert any("closed without `--abandon`" in b for b in cycle.readiness(repo, abandon=True))
     assert cycle.main(["--name", "gave-up", "--abandon", "--reason", "x", "--repo", str(tmp_path)]) == 1
     assert not list((tmp_path / "docs" / "archive").glob("*/ABANDONED.md"))
+
+
+def test_closing_a_cycle_does_not_load_the_build_loop() -> None:
+    """`cycle` reached `build_loop` for the name of one directory, and `events`, which every reader of
+    the audit log imports, went from a third of a second to eight tenths with it."""
+    loaded = subprocess.run(
+        [sys.executable, "-c", "import sys, rein.events; print('rein.build_loop' in sys.modules)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert loaded.stdout.strip() == "False"

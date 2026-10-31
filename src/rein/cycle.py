@@ -31,7 +31,7 @@ import re
 import shutil
 from datetime import date
 
-from rein import common, data, event_chain, models, reviews_cmd
+from rein import common, data, dossier, event_chain, models, reviews_cmd
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -171,6 +171,16 @@ def _archive(repo: repo_mod.Repo, rows: list[tuple[str, str, str]]) -> list[str]
             shutil.move(str(repo.path(src)), str(repo.path(dst)))
         moved.append(src)
     return moved
+
+
+def _remove_launches(repo: repo_mod.Repo) -> None:
+    """Remove every launch's kept output. Its last reader, the retrospective, was written at `/verify`.
+
+    Working material, never the record: what was decided is in the audit chain and the archive.
+    """
+    root = repo.path(dossier.LAUNCHES)
+    if root.is_dir():
+        shutil.rmtree(root)
 
 
 def _restore(repo: repo_mod.Repo, cycle_id: str, branch: str) -> list[str]:
@@ -357,6 +367,9 @@ def main(argv: list[str] | None = None) -> int:
                 "reviews": {"document": dict(carried.document), "digest": carried.digest},
             },
         )
+
+    # Last: the cycle is closed and the next one open whatever happens here.
+    _remove_launches(repo)
 
     print(f"\narchived {len(moved)} item(s), restored {len(restored)} scaffold(s)")
     print(f"cycle '{slug}' is open at phase 'brief'. Commit the archive, then write the next brief.")

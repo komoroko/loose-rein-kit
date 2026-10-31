@@ -52,6 +52,7 @@ def _files(**overrides: str) -> dict[str, str]:
     files = {
         template_lint.AGENTS_MD: _AGENTS,
         template_lint.TASKS_CMD: _TASKS_CMD,
+        template_lint.TASKS_REF: "",
         template_lint.BUILD_CMD: _DOD_PROSE,
         "README.md": _DOD_PROSE,
         "README.ja.md": _DOD_PROSE,
@@ -764,6 +765,7 @@ def test_live_repo_has_no_drift() -> None:
         for path in (
             template_lint.AGENTS_MD,
             template_lint.TASKS_CMD,
+            template_lint.TASKS_REF,
             template_lint.BUILD_CMD,
             template_lint.CONFIG_PATH,
             template_lint.REVIEWS_PATH,
@@ -998,3 +1000,24 @@ def test_check_quoted_gate_names_accepts_a_crossing_gate_and_its_spelling() -> N
 def test_check_quoted_gate_names_reports_a_name_once_per_file() -> None:
     text = "gate 'design' is ready.\nApprove gate 'design'?\n"
     assert len(template_lint.check_quoted_gate_names({"README.md": text})) == 1
+
+
+def test_a_procedure_too_long_to_survive_a_compaction_is_refused() -> None:
+    """After a compaction Claude Code re-attaches an invoked command's first 5,000 tokens and drops the
+    rest. `/build` was over twice that, and what it lost was the second half: how to wait for the
+    run, and what each exit code asks. What is re-attached is the command — its wrapper with the
+    procedure read in — and at Opus's 2.83 bytes a token 14,000 bytes of procedure alone was past it."""
+    wrapper = "---\ndescription: x\n---\n\nExecute the procedure below.\n\n@.rein/prompts/commands/build.md\n"
+    fits = template_lint.COMMAND_BUDGET - len(wrapper.encode()) + len("@.rein/prompts/commands/build.md")
+    texts = {
+        f"{template_lint.COMMANDS_DIR}/build.md": "x" * fits,
+        f"{template_lint.CLAUDE_COMMANDS}/build.md": wrapper,
+        ".rein/prompts/rules/gate-workflow.md": "x" * 40_000,
+    }
+    assert template_lint.check_command_size(texts) == []
+    texts[f"{template_lint.COMMANDS_DIR}/build.md"] = "x" * (fits + 1)
+    assert template_lint.check_command_size(texts) == [
+        f"/build: {template_lint.COMMAND_BUDGET + 1} bytes with its wrapper, over the "
+        f"{template_lint.COMMAND_BUDGET} a compaction keeps — move what one step needs into prompts/reference/"
+    ]
+    assert template_lint.COMMAND_BUDGET <= 5_000 * 2.83 * 0.95, "the budget leaves no margin for the tokenizer"

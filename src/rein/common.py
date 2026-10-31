@@ -225,7 +225,7 @@ class Cancellation:
             self._cancelled = True
             held = list(self._procs)
         for proc in held:
-            _kill_group(proc)
+            kill_group(proc)
 
     def _attach(self, proc: Any) -> bool:
         """Take the launch; False when this token was already tripped, so the caller kills it.
@@ -268,7 +268,8 @@ def run(
     """Run `cmd` (an argv list, never a shell string); return (returncode, stdout+stderr).
 
     A hang past `timeout` kills the command **and every process it started** (the launch gets
-    its own process group / session) and returns :data:`RC_TIMEOUT`. Without the group kill a
+    its own process group / session, and :func:`kill_group` reaches the descendants that left it)
+    and returns :data:`RC_TIMEOUT`. Without the group kill a
     stuck server outlives the run and poisons the next one. On a platform with no `killpg` the
     group is created and only the leader is killed — the children are left, which is one of the
     reasons the supported-environment table calls Windows native unvalidated.
@@ -308,7 +309,7 @@ def run(
 
     with proc:
         if token is not None and not token._attach(proc):
-            _kill_group(proc)  # cancelled in the window between Popen and the attach
+            kill_group(proc)  # cancelled in the window between Popen and the attach
         try:
             output, _ = proc.communicate(input=input_text, timeout=timeout)
             if token is not None and token.cancelled:
@@ -319,7 +320,7 @@ def run(
             # subprocess's own timeout handling kills the direct child only, so anything it
             # spawned survives — a stuck server keeps the port and the next run fails for a
             # reason that has nothing to do with the code. Kill the whole group instead.
-            _kill_group(proc)
+            kill_group(proc)
             output, _ = proc.communicate()
             elapsed = int(timeout) if timeout is not None else 0
             return RC_TIMEOUT, _cap(f"{output or ''}\ntimed out after {elapsed}s (process group killed)")
@@ -331,25 +332,77 @@ def run(
             # So Ctrl-C used to return promptly and leave the agent running, orphaned, still
             # spending. Kill the group, then let the exception carry on: stopping is the caller's
             # decision and this only makes it true of the process as well as of us.
-            _kill_group(proc)
+            kill_group(proc)
             raise
         finally:
             if token is not None:
                 token._detach(proc)
 
 
-def _kill_group(proc: Any) -> None:
-    """SIGKILL the whole process group, falling back to the single process where that fails."""
+def kill_group(proc: Any) -> None:
+    """SIGKILL the whole process group, and every descendant that left it.
+
+    A process can leave the group by starting a session of its own, and an agent CLI does exactly
+    that for a background command: Claude Code's `run_in_background`. Such a descendant outlived the
+    kill, and one holding the output pipe kept the `communicate()` after it from returning until it
+    ended by itself. The descendants are read from `/proc` before anything is killed, while the tree
+    still hangs together. Where there is no `/proc` only the group is reached.
+    """
     import os
     import signal
 
+    strays = _descendants(proc.pid)
     if hasattr(os, "killpg"):
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            return
         except (ProcessLookupError, PermissionError, OSError):
-            pass  # already gone, or a platform that will not let us — fall through
-    proc.kill()
+            proc.kill()  # already gone, or a platform that will not let us
+    else:
+        proc.kill()
+    for pid, started in strays:
+        # A pid freed since the scan can belong to anything by now; its start time says whether it
+        # is still the process that was found.
+        if _stat(pid)[1] != started:
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # it exited after the check
+
+
+def _stat(pid: int | str) -> tuple[int, int] | tuple[None, None]:
+    """`(parent, start time)` from `/proc/<pid>/stat`, or `(None, None)` once the process is gone."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as stat:
+            fields = stat.read().rsplit(")", 1)[1].split()
+    except OSError:
+        return None, None
+    return int(fields[1]), int(fields[19])
+
+
+def _descendants(root: int) -> list[tuple[int, int]]:
+    """Every process below `root` with its start time, read from `/proc`; empty where there is none."""
+    import os
+
+    children: dict[int, list[tuple[int, int]]] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        parent, started = _stat(entry)
+        if parent is None or started is None:
+            continue  # it exited while being read
+        children.setdefault(parent, []).append((int(entry), started))
+    found: list[tuple[int, int]] = []
+    pending = [root]
+    while pending:
+        for child in children.get(pending.pop(), []):
+            found.append(child)
+            pending.append(child[0])
+    return found
 
 
 #: What :func:`_cap` appends when it truncates. Named so a caller that needs the *whole* output

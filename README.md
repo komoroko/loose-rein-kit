@@ -467,6 +467,7 @@ never overwritten. The orchestration code lives in the installed package, not in
 | `.rein/reviews.yaml` | which reviews run — outside the mandate's freeze, changed only by `rein reviews apply` or the dashboard |
 | `.rein/rein.lock` | the document format, the tool version and source, and a content hash per installed file |
 | `.rein/prompts/` | The phase procedures, role definitions and rules modules every agent reads — materialized from the package |
+| `.rein/work/launches/` | every agent launch's whole output, for reading why a task went the way it did — gitignored; `cycle-close` removes it, after the retrospective `/verify` writes |
 | `AGENTS.md`, `CLAUDE.md` | the agent-neutral operating rules, and the Claude Code capability mapping that imports them |
 | `.claude/`, `.github/` | per-agent entry points and gate-guard hook registration, opt-in via `rein install` |
 | `docs/` | the phase deliverables, the speculative work log, and the retrospective |

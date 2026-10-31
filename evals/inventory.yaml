@@ -48,14 +48,17 @@ src/rein/data/prompts/commands/build.md:
       - sentence: "If it is pending, do not work"
         by: tests/test_build_loop.py::test_the_loop_refuses_while_gate_three_is_pending
     rest: unverified
-  "The consumption algorithm": unverified
   "Running it — `rein build`":
     held:
       - sentence: "Commit or stash first."
         by: tests/test_build_loop.py::test_a_dirty_tree_stops_the_run_before_a_task_is_touched
     rest: unverified
-  "Quality-gate step notes": unverified
   "When all tasks complete": unverified
+src/rein/data/prompts/reference/tasks-detail.md:
+  "Reconcile after a roll back": unverified
+  "Brownfield": unverified
+  "Plan fields": unverified
+  "Reviews before the mandate": unverified
 src/rein/data/prompts/commands/design.md:
   "Where this sits": unverified
   "Steps": unverified

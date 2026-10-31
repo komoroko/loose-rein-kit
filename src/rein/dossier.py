@@ -44,6 +44,11 @@ from rein import common, dag, diff_facts, digests, models
 #: Where a leaf finds its dossier, relative to its own working directory.
 RELATIVE_PATH = ".rein/work"
 
+#: Where `rein build` keeps every agent launch's whole output, one directory per cycle. The handoff
+#: keeps only the tail, and why a task took five rounds is in the part before it. Its last reader is
+#: the retrospective `/verify` writes, so `cycle-close` removes all of it.
+LAUNCHES = f"{RELATIVE_PATH}/launches"
+
 #: Where the reviewer writes its findings, beside the dossier it read. A file rather than stdout:
 #: an agent CLI interleaves its own chatter with whatever it means to say, and the one thing that
 #: must not be ambiguous is the boundary between "the reviewer's verdict" and "the reviewer

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -439,6 +441,20 @@ def test_the_stream_is_read_for_the_model_that_answered_and_one_without_a_close_
         harness._read(0, "".join(json.dumps(e) + "\n" for e in events[:2]))
 
 
+def test_a_launch_the_host_re_entered_is_read_whole() -> None:
+    """A lead started `rein build` in the background, as `/build` tells it to, and the host re-entered
+    it when the build exited: one launch, two turns, two `result` events. It was refused as a broken
+    stream, and the run stopped on the sentence's own advice."""
+    events = [
+        {"type": "system", "subtype": "init"},
+        {"type": "result", "subtype": "success", "is_error": False, "result": "started", "modelUsage": {"m": {}}},
+        {"type": "system", "subtype": "init"},
+        {"type": "result", "subtype": "success", "is_error": False, "result": "it exited 2", "modelUsage": {"n": {}}},
+    ]
+    stream = "".join(json.dumps(e) + "\n" for e in events)
+    assert harness._read(0, stream) == harness.Launched(0, stream, ("m", "n"))
+
+
 def test_a_runs_transcripts_are_kept_beside_its_key_and_go_when_its_record_does(stores: Path) -> None:
     scenario = harness.load("review_empty")
     folder = stores / "transcripts" / "review_empty.m"
@@ -528,6 +544,59 @@ def test_a_launch_stopped_at_the_timeout_is_scored_on_what_it_left_and_not_drawn
     assert "aborted" not in record["runs"][0] and record["timeout"] == 1.0
 
 
+def test_a_launch_stopped_at_the_timeout_takes_what_it_started_with_it(tmp_path: Path) -> None:
+    """The timeout killed the CLI and left what it started: a test run the agent began went on
+    changing the scratch repository the trial was scored on, and outlived the run."""
+    started = tmp_path / "started.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(started)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+    stopped = harness.launch_host(tmp_path, [sys.executable, "-c", script], 2.0)
+    assert stopped.timed_out
+    pid = int(started.read_text())
+    deadline = time.monotonic() + 5
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _alive(pid), "a process the CLI started outlived the launch"
+
+
+def test_a_launch_stopped_at_the_timeout_takes_a_command_it_detached_with_it(tmp_path: Path) -> None:
+    """The process-group kill missed what the CLI had moved to a session of its own: Claude Code runs a
+    `run_in_background` command that way, and a `sleep` started so outlived a launch stopped at 45 seconds.
+    One that holds the output pipe also kept the timeout from returning until it ended by itself."""
+    started = tmp_path / "started.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+        f"open({str(started)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+    began = time.monotonic()
+    stopped = harness.launch_host(tmp_path, [sys.executable, "-c", script], 2.0)
+    assert stopped.timed_out
+    assert time.monotonic() - began < 20, "the timeout waited for the detached command to end on its own"
+    pid = int(started.read_text())
+    deadline = time.monotonic() + 5
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if _alive(pid):
+        os.kill(pid, 9)
+        raise AssertionError("a command the CLI detached outlived the launch")
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    # A killed child of a killed parent is reaped by init; until then it is a zombie, not running.
+    stat = Path(f"/proc/{pid}/stat")
+    return not (stat.exists() and stat.read_text().split(") ", 1)[1].startswith("Z"))
+
+
 def test_a_run_interrupted_while_its_record_is_written_keeps_the_record_it_had(
     stores: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -551,4 +620,5 @@ def test_a_run_interrupted_while_its_record_is_written_keeps_the_record_it_had(
         ledger.add("with", _trial(True, "sha256:a", n=1))
     monkeypatch.setattr(Path, "write_text", real)
     assert path.read_text(encoding="utf-8") == before
+    assert [p.name for p in (stores / "results").iterdir()] == [path.name], "the half-written copy was left"
     assert harness.Ledger(scenario, _key(scenario)).remaining("with") == 4

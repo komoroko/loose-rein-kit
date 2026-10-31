@@ -79,7 +79,7 @@ from math import comb
 from pathlib import Path
 from typing import Any
 
-from rein import adapters, executors, models, usage
+from rein import adapters, common, executors, models, usage
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -326,14 +326,28 @@ class Launched:
 
 def launch_host(root: Path, argv: list[str], timeout: float) -> Launched:
     env = {**os.environ, "PATH": f"{root / '.evalbin'}{os.pathsep}{os.environ.get('PATH', '')}"}
-    try:
-        done = subprocess.run(
-            argv, cwd=root, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout
-        )
-    except subprocess.TimeoutExpired as stopped:
-        printed = stopped.stdout or b""
-        return _read(0, printed.decode("utf-8", "replace") if isinstance(printed, bytes) else printed, timed_out=True)
-    return _read(done.returncode, done.stdout + done.stderr if done.returncode else done.stdout)
+    # In its own session, so the timeout reaches what the CLI started — a test run left behind
+    # would go on changing the repository the trial is scored on. `kill_group` also reaches what the
+    # CLI moved to a session of its own: Claude Code runs a background command that way.
+    with subprocess.Popen(
+        argv,
+        cwd=root,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    ) as launched:
+        try:
+            out, err = launched.communicate(timeout=timeout)
+        except BaseException as stopped:
+            common.kill_group(launched)
+            out, _ = launched.communicate()
+            if not isinstance(stopped, subprocess.TimeoutExpired):
+                raise
+            return _read(0, out, timed_out=True)
+    return _read(launched.returncode, out + err if launched.returncode else out)
 
 
 def launch_contained(profile: models.ExecutorProfile) -> Callable[[Path, list[str], float], Launched]:
@@ -354,11 +368,13 @@ def launch_contained(profile: models.ExecutorProfile) -> Callable[[Path, list[st
 
 
 def _read(rc: int, output: str, *, timed_out: bool = False) -> Launched:
-    """The stream's closing `result` event is the envelope `--output-format json` would have printed.
+    """Each turn's closing `result` event is the envelope `--output-format json` would have printed.
 
     A stream stopped at the timeout has no `result` event, and the models are read off the
     assistant messages it did print. Its lines are read one by one and the ones that are not JSON
-    passed over: the kill cuts the last line short, and an executor appends its own note.
+    passed over: the kill cuts the last line short, and an executor appends its own note. One that
+    printed no assistant message names no model, and `Ledger.add` refuses it like a failed launch:
+    no model answered, so it measured nothing of one.
     """
     if timed_out:
         answered: list[str] = []
@@ -375,10 +391,12 @@ def _read(rc: int, output: str, *, timed_out: bool = False) -> Launched:
         return Launched(rc, output, ())
     events = [json.loads(line) for line in output.splitlines() if line.strip()]
     results = [e for e in events if isinstance(e, dict) and e.get("type") == "result"]
-    if len(results) != 1:
-        raise HarnessError(f"the launch's stream closed with {len(results)} result event(s), not one")
-    _, spent = usage.parse_claude_envelope(json.dumps(results[0]))
-    return Launched(rc, output, spent.models)
+    if not results:
+        raise HarnessError("the launch's stream closed with 0 result event(s)")
+    # One per turn: a host that re-enters the agent when a background command exits — what `/build`
+    # tells a lead to rely on — goes on to another turn within the same launch.
+    answered = [model for result in results for model in usage.parse_claude_envelope(json.dumps(result))[1].models]
+    return Launched(rc, output, tuple(dict.fromkeys(answered)))
 
 
 @dataclass(frozen=True)
@@ -584,10 +602,15 @@ class Ledger:
             document["pending"] = self.pending
         RESULTS.mkdir(parents=True, exist_ok=True)
         # Written beside and moved over: a run interrupted mid-write keeps the record it had, rather
-        # than a truncated one the next run cannot read and every trial in it with it.
+        # than a truncated one the next run cannot read and every trial in it with it. A kill the
+        # process cannot see leaves the copy, and the next write of this record replaces it.
         written = self.path.with_name(self.path.name + ".tmp")
-        written.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        os.replace(written, self.path)
+        try:
+            written.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            os.replace(written, self.path)
+        except BaseException:
+            written.unlink(missing_ok=True)
+            raise
 
 
 def evaluate(
