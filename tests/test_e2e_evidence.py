@@ -169,7 +169,7 @@ def test_an_implementer_that_changes_nothing_keeps_what_it_said(
     assert handoff["last_agent"]["role"] == "implementer"
 
 
-def test_an_implementers_whole_output_is_kept_for_the_cycle_and_named_in_its_note(
+def test_an_implementers_whole_output_is_kept_and_named_in_its_note(
     repo: repo_mod.Repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Only the tail survived a launch, so why a task took five rounds could not be read afterwards:
@@ -181,9 +181,7 @@ def test_an_implementers_whole_output_is_kept_for_the_cycle_and_named_in_its_not
     handoff = status_of(repo, "T-001")["handoff"]
     assert isinstance(handoff, dict)
     kept = repo.root / handoff["last_agent"]["transcript"]
-    state = store_mod.Store(repo).read_state()
-    assert state is not None
-    assert kept.parent == repo.root / ".rein" / "work" / "launches" / state.cycle_id
+    assert kept.parent == repo.root / ".rein" / "work" / "launches"
     assert "the agent's closing words" in kept.read_text(encoding="utf-8")
 
 
@@ -552,3 +550,32 @@ def test_the_dossier_is_written_where_the_agent_is_told_to_read_it(
 
     assert found and found[0]["task"]["id"] == "T-001"
     assert found[0]["env"]["role"] == "implementer"
+
+
+def test_a_launch_note_names_its_transcript_whole() -> None:
+    """The note cut the path at 200 characters, and a long enough one named a file that is not there."""
+    schema = json.loads((Path(build_loop.__file__).parent / "data" / "schema" / "state.schema.json").read_text())
+    longest = "x" * 240
+    note = build_loop.agent_launch_note(role="implementer", adapter="claude", rc=0, output="", transcript=longest)
+    assert note["transcript"] == longest
+    transcript = _schema_property(schema, "transcript")
+    assert transcript["maxLength"] >= len(longest)
+
+
+def _schema_property(node: Any, name: str) -> dict[str, Any]:
+    if isinstance(node, dict):
+        if isinstance(node.get("properties"), dict) and name in node["properties"]:
+            found: dict[str, Any] = node["properties"][name]
+            return found
+        for value in node.values():
+            try:
+                return _schema_property(value, name)
+            except KeyError:
+                continue
+    if isinstance(node, list):
+        for value in node:
+            try:
+                return _schema_property(value, name)
+            except KeyError:
+                continue
+    raise KeyError(name)

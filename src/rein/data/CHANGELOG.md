@@ -26,22 +26,27 @@ is all a repository needs. Four change requests (CR-106 to CR-109).
   for the shortcut, so all five are gone. The typed confirmation still holds `--push`.
 - **A command procedure fits what a compaction keeps (CR-108).** After a compaction Claude Code
   re-attaches an invoked command's first 5,000 tokens and drops the rest, and these prompts measure
-  about 2.9 bytes a token: `build.md` was about 11,000 tokens and `tasks.md` 10,602, so what a
-  long session lost was the second half — how to wait for the run and what each exit code asks, the
-  plan's fields, the reviews before the mandate, the gate itself. `template_lint` refuses a
-  procedure over 14,000 bytes. What one step of `/tasks` needs — reconciling after a roll back, an
+  2.83 bytes a token on Opus 5.5 and Sonnet 5.5: `build.md` (32.8KB) and `tasks.md` (31.4KB,
+  10,602 tokens on Haiku 5.5) were each over twice that, so what a long session lost was the second
+  half — how to wait for the run and what each exit code asks, the plan's fields, the reviews before
+  the mandate, the gate itself.
+  `template_lint` refuses a command over 13,442 bytes, its Claude Code wrapper and its procedure
+  together — 5% under the line. What one step of `/tasks` needs — reconciling after a roll back, an
   adopted repository, the plan's fields, the reviews before the mandate — moved word for word to
   `.rein/prompts/reference/tasks-detail.md`, which `/tasks` reads at that step.
 - **Every agent launch's whole output is kept for its cycle (CR-109).** `handoff.last_agent` kept
   the last 4,000 characters, and why a task went round five times was in the part before them. Each
   launch `rein build` makes — retries and failures included — writes its whole output under
-  `.rein/work/launches/<cycle>/` before anything parses it, and `handoff.last_agent.transcript`
-  names the file. `cycle-close` keeps the cycle it closes, for its retrospective, and removes older
-  ones once the next cycle is open. Launches of `rein review generate` are not kept this way.
-- **A behaviour-test launch stopped at its timeout takes what it started with it (CR-106).** The
-  host launch killed the CLI and left whatever the CLI had started, which went on changing the
-  repository the trial was scored on. It now runs in its own session and the timeout kills the
-  group. A record write that is interrupted removes the copy it was writing. A launch the host
+  `.rein/work/launches/` before anything parses it, and `handoff.last_agent.transcript` names the
+  file. Their last reader is the retrospective `/verify` writes, so `cycle-close` removes them all
+  once the next cycle is open. Launches of `rein review generate` are not kept this way.
+- **A launch stopped at its timeout takes what it started with it (CR-106).** A behaviour-test
+  launch killed the CLI and left whatever the CLI had started, which went on changing the repository
+  the trial was scored on; it now runs in its own session and the timeout kills the group. The group
+  kill — `common.run`'s too, which `rein build` uses — also reaches every descendant that left the
+  group, read from `/proc` before the kill: Claude Code runs a `run_in_background` command in a
+  session of its own, so it outlived the kill, and one holding the output pipe kept the timeout from
+  returning until it ended by itself. A record write that is interrupted removes the copy it was writing. A launch the host
   re-entered is read as one launch: an agent that starts a command in the background gets a second
   turn and a second `result` event, and the harness refused that stream as broken.
 

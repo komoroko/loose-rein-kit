@@ -582,9 +582,9 @@
                     "maxLength": 4000
                   },
                   "transcript": {
-                    "description": "Where the launch's whole output is kept, relative to the repository: under `.rein/work/launches/<cycle>/`, until the cycle after next is closed. Empty in a dry run.",
+                    "description": "Where the launch's whole output is kept, relative to the repository: under `.rein/work/launches/`, until the cycle is closed. Empty in a dry run.",
                     "type": "string",
-                    "maxLength": 200
+                    "maxLength": 256
                   },
                   "at": {
                     "type": "string",

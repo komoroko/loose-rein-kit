@@ -684,11 +684,6 @@ _HANDOFF_STEP_MAX = 64
 _HANDOFF_SUMMARY_MAX = 4000
 _HANDOFF_BRANCH_MAX = 200
 
-#: Where every agent launch's whole output is kept, one directory per cycle. The handoff keeps only
-#: the tail, and why a task took five rounds is in the part before it. Gitignored with the rest of
-#: `.rein/work/`; `cycle-close` keeps the cycle it closes, for its retrospective, and removes older ones.
-LAUNCHES = f"{dossier.RELATIVE_PATH}/launches"
-
 #: The handoff fields that describe *one* failure: which step, what it said, why no further
 #: round was spent, and the verdict an attempt stopped on before the gate. They are written as a
 #: unit — a new failure replaces all of them, and a green gate clears all of them. Merged field by
@@ -908,7 +903,7 @@ def agent_launch_note(
     operator as a task that simply changed nothing. The tail is kept rather than the whole stream:
     an agent's closing words are where it says what stopped it, and `state.yaml` has to stay
     writable at exactly the moment it is carrying a failure; `transcript` names where the whole
-    output is (`LAUNCHES`).
+    output is (`dossier.LAUNCHES`).
 
     A note is *carried* to the next status write rather than written on its own. A launch is not a
     state change, and this repository has no event-less write path on purpose — so an event per
@@ -920,7 +915,9 @@ def agent_launch_note(
         "rc": max(-256, min(256, rc)),
         "session": session[:128],
         "output_tail": output[-_HANDOFF_SUMMARY_MAX:],
-        "transcript": transcript[:_HANDOFF_BRANCH_MAX],
+        # Whole, never cut: a cut path names a file that is not there. Its parts are bounded — the
+        # run's stamp, a number, a role and a task id — so it fits the schema's 256.
+        "transcript": transcript,
         "at": event_chain.now_iso(),
     }
 
@@ -1431,15 +1428,15 @@ class Orchestrator:
             attempt += 1
 
     def _keep_launch(self, output: str, *, role: str, task_id: str) -> str:
-        """Write one launch's whole output under this cycle's `LAUNCHES`, before anything parses it,
-        and return where — relative to the repository — or "" in a dry run, which launches nothing.
-        A retry is another launch and gets a file of its own."""
-        if self.dry_run or not self.cycle_id:
+        """Write one launch's whole output under `dossier.LAUNCHES`, before anything parses it, and
+        return where — relative to the repository — or "" in a dry run, which launches nothing. A
+        retry is another launch and gets a file of its own."""
+        if self.dry_run:
             return ""
         with self._evidence_lock:
             number = next(self._launches)
         name = "-".join(part for part in (self._run_started, f"{number:04d}", role, task_id) if part)
-        relative = f"{LAUNCHES}/{self.cycle_id}/{re.sub(r'[^A-Za-z0-9._-]', '_', name)}.log"
+        relative = f"{dossier.LAUNCHES}/{re.sub(r'[^A-Za-z0-9._-]', '_', name)}.log"
         path = self.repo.path(relative)
         path.parent.mkdir(parents=True, exist_ok=True)
         # "x": a name already taken is two launches under one name, and the second must not erase the first.
