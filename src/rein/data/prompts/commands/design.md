@@ -26,7 +26,7 @@ and changing the approach it cites needs `/revise` and a re-approval, so say so 
    - **Record the adversarial-review summary**: finding counts by severity, the dispositions, and any unresolved dispute (an unresolved dispute is the human's to settle — never loop further with the reviewer).
    - Tell the human what the design settled and what the mandate still needs. The technical choices were theirs to make (step 3) and they made them; the approval that covers them is the mandate's.
 
-Write the deliverables (`docs/20-design.md`, `docs/decisions/ADR-*.md`) in the user's language.
+Write the deliverables (`docs/20-design.md`, `docs/decisions/ADR-*.md`) in the language `project.language` in `.rein/config.yaml` names (`en` when it is absent).
 
 ## While the mandate is unapproved
 No product code (`rein guard` denies it), and only **throwaway-by-default** work recorded in `docs/speculative-work.md` (rules: `.rein/prompts/rules/gate-workflow.md` "While a gate is pending"):

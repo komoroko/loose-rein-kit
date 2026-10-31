@@ -199,9 +199,9 @@ def test_repo_path_rejects_escapes(path: str) -> None:
 
 # --- plan fixture -------------------------------------------------------------
 #
-# The Expected Model is deliberately small: `cycle`, `claims`, and `tasks` — one claim per
-# `R-N`/`NFR-N` heading, one task per unit of work, and `claim_ids` is the only edge between
-# them. Everything else that used to live here (sources, searches, evidence obligations,
+# The Expected Model is deliberately small: `cycle`, `claims`, and `issues` — one claim per
+# `R-N`/`NFR-N` heading, one sub-issue per unit of approved work, and `claim_ids` is the only edge
+# between them. Everything else that used to live here (sources, searches, evidence obligations,
 # technical facts, solutions, acceptance oracles) had no writer in any phase procedure.
 
 MINIMAL_PLAN = """
@@ -226,19 +226,21 @@ claims:
     statement: a lost response never double-commits the same logical request
     risk: critical
     domains: [payment, idempotency]
-tasks:
-  - id: T-001
-    title: Foundation
+issues:
+  - id: I-001
+    title: Idempotent retries
     kind: foundation
-    risk: low
-  - id: T-002
-    title: Preserve idempotency across retries
-    kind: parallel
-    blocked_by: [T-001]
-    claim_ids: [C-002]
-    domains: [payment]
-    risk: critical
-    scope: {include: [src/payment/], exclude: [docs/]}
+    sub_issues:
+      - id: T-001
+        title: Foundation
+        risk: low
+      - id: T-002
+        title: Preserve idempotency across retries
+        blocked_by: [T-001]
+        claim_ids: [C-002]
+        domains: [payment]
+        risk: critical
+        scope: {include: [src/payment/], exclude: [docs/]}
 """
 
 
@@ -264,8 +266,8 @@ def test_plan_digest_survives_a_reflow_but_not_an_edit() -> None:
     # Same facts, different YAML layout: a reflow must not invalidate a signed gate receipt.
     reflowed = models.Plan.parse(
         TASK_PLAN.replace(
-            "    scope: {include: [src/payment/], exclude: [docs/]}",
-            "    scope:\n      exclude: [docs/]\n      include: [src/payment/]",
+            "        scope: {include: [src/payment/], exclude: [docs/]}",
+            "        scope:\n          exclude: [docs/]\n          include: [src/payment/]",
         )
     )
     assert reflowed.digest() == plan.digest()
@@ -312,16 +314,16 @@ def test_dangling_claim_reference_in_a_task_is_caught() -> None:
 
 def test_duplicate_claim_id_is_caught() -> None:
     doubled = TASK_PLAN.replace(
-        "tasks:",
-        "  - id: C-002\n    statement: dup\n    risk: low\ntasks:",
+        "\nissues:",
+        "\n  - id: C-002\n    statement: dup\n    risk: low\nissues:",
     )
     assert "duplicate id 'C-002'" in _plan_error(doubled)
 
 
 def test_task_dependency_cycle_is_caught() -> None:
     bad = TASK_PLAN.replace(
-        "    title: Foundation\n    kind: foundation\n    risk: low",
-        "    title: Foundation\n    kind: foundation\n    risk: low\n    blocked_by: [T-002]",
+        "        title: Foundation\n        risk: low",
+        "        title: Foundation\n        risk: low\n        blocked_by: [T-002]",
     )
     assert "dependency cycle" in _plan_error(bad)
 
@@ -336,6 +338,52 @@ def test_all_errors_are_reported_not_just_the_first() -> None:
     bad = bad.replace("blocked_by: [T-001]", "blocked_by: [T-777]")
     message = _plan_error(bad)
     assert "C-999" in message and "T-777" in message
+
+
+def test_a_sub_issue_carries_its_issues_kind_and_waits_for_every_sub_issue_of_an_issue_upstream() -> None:
+    plan = models.Plan.parse(
+        TASK_PLAN
+        + """  - id: I-002
+    title: Report
+    kind: parallel
+    blocked_by: [I-001]
+    sub_issues:
+      - id: T-003
+        title: Report the retries
+        risk: low
+"""
+    )
+    report = plan.task("T-003")
+    assert report is not None and report.issue_id == "I-002" and report.kind == "parallel"
+    assert report.own_blocked_by == () and report.blocked_by == ("T-001", "T-002")
+    assert plan.task("T-001").kind == "foundation"  # type: ignore[union-attr]
+    assert [i.id for i in plan.issues] == ["I-001", "I-002"]
+    assert plan.issue("I-001").sub_issue_ids == ("T-001", "T-002")  # type: ignore[union-attr]
+
+
+def test_a_sub_issue_edge_into_another_issue_is_refused_and_names_the_issue_edge() -> None:
+    message = _plan_error(
+        TASK_PLAN
+        + """  - id: I-002
+    title: Report
+    kind: parallel
+    sub_issues:
+      - id: T-003
+        title: Report the retries
+        blocked_by: [T-002]
+        risk: low
+"""
+    )
+    assert "T-003" in message and "another issue" in message and "I-002 on I-001" in message
+
+
+def test_an_unknown_issue_edge_and_an_empty_issue_are_refused() -> None:
+    assert "unknown blocked_by issue id 'I-009'" in _plan_error(
+        TASK_PLAN.replace("    kind: foundation\n", "    kind: foundation\n    blocked_by: [I-009]\n")
+    )
+    assert "sub_issues" in _plan_error(
+        TASK_PLAN + "  - id: I-002\n    title: Nothing\n    kind: parallel\n    sub_issues: []\n"
+    )
 
 
 # --- state --------------------------------------------------------------------

@@ -511,11 +511,14 @@ def test_every_change_made_after_the_freeze_is_a_residual_review_yaml_accepts() 
     state["tasks"] = {
         "T-001": {"status": "done", "attempts": 3, "attempts_max": 4, "scope_added": ["tests/x.py"]},
         "T-002": {"status": "todo", "after": ["T-001"]},
+        "T-003": {"status": "done", "unbundled": "the bundle's gate stayed red"},
     }
     section = brief.derive(plan=None, state=models.State(state), config=None)
     assert set(section["residuals"]) >= {
         "attempts_raised_after_mandate",
         "scope_added_after_mandate",
         "ordered_after_mandate",
+        "split_from_bundles",
     }
+    assert section["residuals"]["split_from_bundles"] == [{"task_id": "T-003", "why": "the bundle's gate stayed red"}]
     assert models.schema_errors(make_review(generated=True, brief=section), "review") == []

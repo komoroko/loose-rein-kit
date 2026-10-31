@@ -64,7 +64,7 @@ You drive this project's requirements definition. **Human on the Loop**: you do 
    - **Record the adversarial-review summary**: finding counts by severity, the dispositions, and any unresolved dispute (an unresolved dispute is the human's to settle — never loop further with the reviewer).
    - Tell the human where the mandate now stands and what it still needs. If the change is small enough that the design and the task DAG are obvious, say so and go straight on — the order of these three is yours to choose, and one approval covers all of them.
 
-Write the deliverable (`docs/10-requirements.md`) in the user's language.
+Write the deliverable (`docs/10-requirements.md`) and the claims' prose in the language `project.language` in `.rein/config.yaml` names (`en` when it is absent).
 
 ## While the mandate is unapproved
 No product code (`rein guard` denies it), and only **throwaway-by-default** work recorded in `docs/speculative-work.md` (rules: `.rein/prompts/rules/gate-workflow.md` "While a gate is pending"):

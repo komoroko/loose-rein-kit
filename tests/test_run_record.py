@@ -245,3 +245,26 @@ def test_what_a_cache_replayed_is_not_part_of_the_spend() -> None:
     events = _measured("c1", {"reused_by_role": {"reviewer": paid.to_detail()}})
 
     assert run_record.cycle_spend(events, "c1") == usage_mod.Spend()
+
+
+def test_a_split_bundle_is_counted_beside_the_runs_it_made_longer() -> None:
+    """CR-83: each sub-issue of a bundle that did not land is launched again, alone. A launch is
+    billed by role, not by why it ran, so the report says how much ran twice rather than a price."""
+    paid = usage_mod.Usage(available=True, launches=4, input_tokens=100, cost_usd=1.0)
+    events = [
+        event_chain.make("bundle_split", "c1", subject_ids=("T-001", "T-002", "T-003"), detail={"why": "red"}),
+        event_chain.make(
+            "run_measured",
+            "c1",
+            detail={
+                "kind": "build",
+                "run_id": "r1",
+                "outcome": "done",
+                "billed_by_role": {"implementer": paid.to_detail()},
+            },
+        ),
+    ]
+    [row] = run_record.costs([("", events)])
+    assert (row.splits, row.relaunched) == (1, 3)
+    assert "bundles split: 1, sending 3 sub-issue(s) back to run alone" in run_record.render_costs([row])
+    assert "bundles split" not in run_record.render_costs(_cost({"billed_by_role": {}}))

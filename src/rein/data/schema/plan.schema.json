@@ -41,11 +41,12 @@
         "$ref": "#/$defs/claim"
       }
     },
-    "tasks": {
+    "issues": {
+      "description": "The work, in two levels. An issue is the most one launch may carry and the unit the DAG orders; its sub-issues are what a human approves — each one's scope, criteria, claims and irreversible declarations are frozen with the mandate, and findings are attributed to them. How the sub-issues of an issue are grouped into launches is the loop's business and is not frozen: regrouping changes nothing anybody approved.",
       "type": "array",
-      "maxItems": 512,
+      "maxItems": 256,
       "items": {
-        "$ref": "#/$defs/task"
+        "$ref": "#/$defs/issue"
       }
     },
     "premises": {
@@ -119,6 +120,10 @@
     "claimId": {
       "type": "string",
       "pattern": "^C-[0-9]{3,}$"
+    },
+    "issueId": {
+      "type": "string",
+      "pattern": "^I-[0-9]{3,}$"
     },
     "taskId": {
       "type": "string",
@@ -217,13 +222,54 @@
         }
       }
     },
-    "task": {
+    "issue": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "id",
         "title",
         "kind",
+        "sub_issues"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/issueId"
+        },
+        "title": {
+          "$ref": "#/$defs/label"
+        },
+        "kind": {
+          "description": "The DAG role that drives orchestration: layers, parallelism, and merge order derive from it, not from LLM discretion. Every sub-issue of the issue has it.",
+          "enum": [
+            "foundation",
+            "parallel",
+            "integration"
+          ]
+        },
+        "blocked_by": {
+          "description": "Issues whose every sub-issue must be done before any sub-issue of this one starts.",
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/issueId"
+          }
+        },
+        "sub_issues": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/task"
+          }
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
         "risk"
       ],
       "properties": {
@@ -232,14 +278,6 @@
         },
         "title": {
           "$ref": "#/$defs/label"
-        },
-        "kind": {
-          "description": "The DAG role that drives orchestration: layers, parallelism, and merge order derive from it, not from LLM discretion.",
-          "enum": [
-            "foundation",
-            "parallel",
-            "integration"
-          ]
         },
         "produced_by": {
           "description": "Who produces this task's deliverable. `agent` (the default) is launched as an implementer. `person` is never launched: its deliverable is something only a person can make — labels judged by eye, a recording, a measurement on a device — and sending an implementer at it has two outcomes, a stop or a fabrication. The loop waits for the files its `artifact` criteria name to be committed on the work branch, and dependents reach it through ordinary `blocked_by` edges.",
@@ -253,7 +291,8 @@
           "maxItems": 64,
           "items": {
             "$ref": "#/$defs/taskId"
-          }
+          },
+          "description": "Sub-issues of the same issue that must be done first. An edge to another issue's work is the issue's own `blocked_by`, never a sub-issue's."
         },
         "claim_ids": {
           "type": "array",

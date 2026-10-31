@@ -591,3 +591,47 @@ def test_the_chain_answers_for_its_own_task_outcomes() -> None:
     chain = _chain(("task_started", ("T-1",)), ("task_completed", ("T-1",)))
 
     assert events.task_outcomes(chain)["T-1"] == "done"
+
+
+def test_only_an_implementer_s_local_decision_of_this_cycle_is_listed() -> None:
+    """`decision_declared` means several things — salvage branches, resets, the PR-stack ledger. Only
+    the one marked a local decision is a decision a human may overrule."""
+    decided: dict[str, object] = {
+        "kind": models.LOCAL_DECISION,
+        "statement": "s",
+        "rationale": "r",
+        "undo": "u",
+        "anchor": "a:1",
+    }
+    built = _detailed(
+        ("decision_declared", ("T-1",), decided),
+        ("decision_declared", ("T-2",), {"kind": "task_reset", "reason": "x"}),
+        ("decision_declared", ("T-3",), {"salvage_branch": "b"}),
+    )
+    listed = events.local_decisions(built, "demo-cycle")
+    assert [(d["task"], d["statement"], d["undo"]) for d in listed] == [("T-1", "s", "u")]
+    assert listed[0]["id"] == models.local_decision_id(built[0].id)
+    assert listed[0]["overruled"] is False
+    assert events.local_decisions(built, "another-cycle") == []
+
+    ld = models.local_decision_id(built[0].id)
+    overrule = event_chain.link(
+        built[-1], event_chain.make("decision_overruled", "demo-cycle", subject_ids=(ld, "T-1"))
+    )
+    [one] = events.local_decisions([*built, overrule], "demo-cycle")
+    assert one["overruled"] is True
+
+
+def test_an_observation_is_open_until_a_repair_closes_it() -> None:
+    built = _detailed(
+        (
+            "finding_observed",
+            ("T-1", "T-2"),
+            {"step": "review", "severity": "must_fix", "statement": "s", "anchor": "a:1"},
+        ),
+        ("finding_observed", ("T-1",), {"step": "review", "severity": "question", "statement": "q", "anchor": "b:2"}),
+    )
+    first = models.observation_id(built[0].id)
+    closed = event_chain.link(built[-1], event_chain.make("observation_repaired", "demo-cycle", subject_ids=(first,)))
+    assert [o["seen_in"] for o in events.open_observations(built, "demo-cycle")] == ["T-1,T-2", "T-1"]
+    assert [o["statement"] for o in events.open_observations([*built, closed], "demo-cycle")] == ["q"]

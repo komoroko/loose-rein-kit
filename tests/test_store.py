@@ -632,7 +632,7 @@ def _seed_plan_without_reversible(tmp_path: Path) -> None:
     seed_repo(tmp_path, state=make_state(), plan=make_plan(claims=[make_claim("C-001")], tasks=[task]))
     path = tmp_path / ".rein" / "plan.yaml"
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    del document["tasks"][0]["operator_surface"][0]["reversible"]
+    del document["issues"][0]["sub_issues"][0]["operator_surface"][0]["reversible"]
     path.write_text(yaml.safe_dump(document, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
 

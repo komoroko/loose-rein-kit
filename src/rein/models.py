@@ -27,6 +27,7 @@ Layer 2's enums and this module's vocabulary constants are two spellings of one 
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -78,9 +79,10 @@ GATE_ENDS: tuple[str, str] = (GATE_FIRST, GATE_LAST)
 #: mandate and upstream of acceptance, and nothing more. Which one the loop reaches first is
 #: execution order, which `00-concept.md` puts inside the delegation and not at a contact point.
 CROSSING_GATE_RE = re.compile(r"^T-[0-9]+$")
-#: The fields of a task that place it in the order of the work rather than say what it may do:
-#: its edges, and the DAG-shape class derived with them. Outside a crossing gate's subject.
-TASK_ORDER_KEYS: tuple[str, ...] = ("blocked_by", "kind")
+#: The fields of a sub-issue that place it in the order of the work rather than say what it may do:
+#: its edges. Outside a crossing gate's subject, like the issue's own edges and DAG-shape class,
+#: which live on the issue and so were never in the sub-issue's entry to begin with.
+TASK_ORDER_KEYS: tuple[str, ...] = ("blocked_by",)
 GATE_STATUS_VALUES = frozenset({"pending", "approved"})
 
 
@@ -210,6 +212,37 @@ TASK_STATUS_VALUES = frozenset(TASK_STATUS_ORDER)
 # waiting to be picked up, merged into the fresh worktree, or left on its branch because merging
 # it conflicted (see state.schema.json `handoff`).
 SALVAGE_STATE_VALUES = frozenset({"pending", "restored", "conflict"})
+
+#: What marks an implementer's own decision among the `decision_declared` events, which other
+#: call sites use for salvage branches, resets and the PR-stack ledger. It is a decision whose
+#: reversal moves no claim, scope or acceptance criterion (one that would is a defect in the plan,
+#: reported `needs-revision`), so it is made and the task goes on; the tasks downstream are handed
+#: it, and the acceptance gate lists it for a human to overrule.
+LOCAL_DECISION = "local_decision"
+
+#: The fields a local decision is refused without. It is not asked, so the record is all the human
+#: gets: what was decided, why, what overruling it would mean redoing, and where it is. Prose
+#: alone does not hold a required field — an agent drops it, and the list it feeds goes quietly
+#: empty.
+LOCAL_DECISION_FIELDS: tuple[str, ...] = ("statement", "rationale", "undo", "anchor")
+
+#: The subject id a local decision is answered under at acceptance: stable across regenerations of
+#: the review, because it is derived from the chain event that recorded it.
+LOCAL_DECISION_ID_PREFIX = "LD-"
+
+
+def local_decision_id(event_id: str) -> str:
+    return LOCAL_DECISION_ID_PREFIX + hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:8]
+
+
+#: The subject id of what a confirming reader saw beyond a fix (`finding_observed`), as acceptance
+#: routes and repairs it. Derived from the recording event, like a local decision's.
+OBSERVATION_ID_PREFIX = "OB-"
+
+
+def observation_id(event_id: str) -> str:
+    return OBSERVATION_ID_PREFIX + hashlib.sha256(event_id.encode("utf-8")).hexdigest()[:8]
+
 
 # What an implementer says about its own attempt, through `rein report`. Deliberately *not* the
 # task-status vocabulary: a status is a verdict the loop reaches, this is a claim the agent makes,
@@ -438,6 +471,13 @@ EVENT_ORDER: tuple[str, ...] = (
     "task_started",
     "task_failed",
     "task_completed",
+    # The sub-issues one launch carried landed together, in one commit. Its own kind because it is
+    # what lets two sub-issues name the same `completed_commit`: without it that is the sign of a
+    # hand-edited state (`pr_stack.derive` refuses it), and with it, one pull request carrying both.
+    "bundle_landed",
+    # A launch carrying several sub-issues ended without landing, and each of them goes back to run
+    # alone. Not `task_failed`: a bundle's failure is no verdict about any one of its sub-issues.
+    "bundle_split",
     # The run stopped because the machine failed, not because any task did. Deliberately outside
     # `events.ATTENTION_EVENTS`: it asks nobody to judge the work, it asks for a re-run.
     "run_aborted",
@@ -471,6 +511,17 @@ EVENT_ORDER: tuple[str, ...] = (
     # configured then.
     "reviews_applied",
     "decision_declared",
+    # A human overruled a decision an implementer made without asking (`LOCAL_DECISION`), at the
+    # acceptance gate. Its own kind because it is the moment that decision stops being the loop's
+    # and becomes a person's: `rein decisions` reads it as theirs, and the next `rein build` repairs
+    # the code it shaped.
+    "decision_overruled",
+    # A reader confirming a fix saw something beyond the fix (devr 論点 S). Not that fix's question,
+    # so it went back to nobody and spent no round; recorded so it is not lost, and carried by every
+    # review until a repair closes it (`observation_repaired`).
+    "finding_observed",
+    # A repair at acceptance landed for one `finding_observed`. What takes it off the next review.
+    "observation_repaired",
     # One lens was pointed at one deliverable, and whether it found anything. Outside
     # `ATTENTION_EVENTS`: it asks nobody to judge anything, it is what makes the library
     # answerable later. A lens that keeps being applied and never finds has the wrong condition
@@ -613,6 +664,7 @@ CENTRAL_ONLY_CAPABILITIES = frozenset(
 
 ID_PATTERNS: Mapping[str, re.Pattern[str]] = {
     "claim": re.compile(r"^C-\d{3,}$"),
+    "issue": re.compile(r"^I-\d{3,}$"),
     "task": re.compile(r"^T-\d{3,}$"),
     #: Scoped to its task, so a short number is enough — `A-1` of T-004 and `A-1` of T-005 are
     #: different criteria, and nothing ever refers to one from outside its own task.
@@ -632,6 +684,9 @@ ID_PATTERNS: Mapping[str, re.Pattern[str]] = {
 #: event that cannot name its own is unfindable — and fails the schema `event_chain.scan` and
 #: `rein doctor` validate the log against, which is how a recording failure became a chain defect.
 CYCLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+#: A language tag for `project.language`: a BCP 47 primary language and its subtags (`en`, `pt-BR`).
+LANGUAGE_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$")
+DEFAULT_LANGUAGE = "en"
 
 
 def is_repo_path(value: object) -> bool:
@@ -805,8 +860,14 @@ class Claim(Element):
 
 
 @dataclass(frozen=True)
-class Task(Element):
-    """One unit of implementation work and the claims it is answerable for."""
+class Issue(Element):
+    """The most one launch may carry, and the unit the DAG orders.
+
+    What a human approves sits one level down, in its sub-issues. The issue holds what places that
+    work in the order of the cycle — its edges to other issues and its DAG role — and the bound on
+    how the loop may group its sub-issues into launches, which is the part nobody approved and the
+    loop is free to change.
+    """
 
     @property
     def title(self) -> str:
@@ -815,6 +876,37 @@ class Task(Element):
     @property
     def kind(self) -> str:
         return _str(self.raw, "kind", "parallel")
+
+    @property
+    def blocked_by(self) -> tuple[str, ...]:
+        return _ids(self.raw, "blocked_by")
+
+    @property
+    def sub_issue_ids(self) -> tuple[str, ...]:
+        return tuple(_str(entry, "id") for entry in _maps(self.raw, "sub_issues"))
+
+
+@dataclass(frozen=True)
+class Task(Element):
+    """One sub-issue: a unit of approved work and the claims it is answerable for.
+
+    `raw` is the sub-issue's own entry, which is what a crossing approval binds. Where it sits in
+    the DAG comes from its issue and is carried beside it: `issue_id`, the issue's `kind`, and
+    `upstream` — every sub-issue of the issues its issue waits for, so the graph the loop schedules
+    is one of sub-issues and an issue-level edge needs no second scheduler.
+    """
+
+    issue_id: str = ""
+    issue_kind: str = "parallel"
+    upstream: tuple[str, ...] = ()
+
+    @property
+    def title(self) -> str:
+        return _str(self.raw, "title")
+
+    @property
+    def kind(self) -> str:
+        return self.issue_kind
 
     @property
     def produced_by(self) -> str:
@@ -846,8 +938,14 @@ class Task(Element):
         return _maps(self.raw, "operate")
 
     @property
-    def blocked_by(self) -> tuple[str, ...]:
+    def own_blocked_by(self) -> tuple[str, ...]:
+        """The sub-issues of the same issue this one waits for, as the plan states them."""
         return _ids(self.raw, "blocked_by")
+
+    @property
+    def blocked_by(self) -> tuple[str, ...]:
+        """Everything this sub-issue waits for: its own edges, then its issue's, expanded."""
+        return tuple(dict.fromkeys((*self.own_blocked_by, *self.upstream)))
 
     @property
     def claim_ids(self) -> tuple[str, ...]:
@@ -1099,7 +1197,7 @@ class LensSelection(Element):
 
 _PLAN_SECTIONS: Mapping[str, type[Element]] = {
     "claims": Claim,
-    "tasks": Task,
+    "issues": Issue,
     "decisions": Decision,
     "lenses": LensSelection,
     "premises": Premise,
@@ -1114,12 +1212,14 @@ class Plan:
     """``plan.yaml`` — the Expected Model, frozen when the mandate is approved (plan §6.1).
 
     Everything a reviewer compares reality against lives here, and after the freeze the only way to
-    change it is `rein revise --to mandate` — **the whole document, `tasks` included**. There was a
+    change it is `rein revise --to mandate` — **the whole document, `issues` included**. There was a
     second digest here that covered `cycle` + `scope` + `claims` only, on the reading that a
     different decomposition of the same mandate is the same authorization. It is not, and the
-    reason is one field: `tasks[].acceptance` is a task's own bar, and a human freezes that list
+    reason is one field: a sub-issue's `acceptance` is its own bar, and a human freezes that list
     with the mandate. A digest that skipped `tasks` would have let a criterion be softened under an
     approval that never covered it — the mandate widened to fit the work, with nothing to notice.
+    What *is* outside the freeze is how the sub-issues of an issue are grouped into launches
+    (`bundles`), because no grouping can move a criterion: each stays on its own sub-issue.
     The views below are built once in `__post_init__`; `raw` stays the digest subject.
     """
 
@@ -1131,6 +1231,18 @@ class Plan:
         for section, view in _PLAN_SECTIONS.items():
             entries = _maps(self.raw, section)
             index[section] = {_str(e, "id"): view(e) for e in entries}
+        issues = [i for i in index["issues"].values() if isinstance(i, Issue)]
+        members = {issue.id: issue.sub_issue_ids for issue in issues}
+        index["tasks"] = {
+            _str(entry, "id"): Task(
+                entry,
+                issue_id=issue.id,
+                issue_kind=issue.kind,
+                upstream=tuple(dict.fromkeys(sid for blocker in issue.blocked_by for sid in members.get(blocker, ()))),
+            )
+            for issue in issues
+            for entry in _maps(issue.raw, "sub_issues")
+        }
         object.__setattr__(self, "_index", index)
 
     # -- construction ---------------------------------------------------------
@@ -1194,7 +1306,12 @@ class Plan:
         return self._section("claims")
 
     @property
+    def issues(self) -> tuple[Issue, ...]:
+        return self._section("issues")
+
+    @property
     def tasks(self) -> tuple[Task, ...]:
+        """Every sub-issue of every issue, in plan order."""
         return self._section("tasks")
 
     @property
@@ -1247,6 +1364,10 @@ class Plan:
     def task(self, task_id: str) -> Task | None:
         found = self.get("tasks", task_id)
         return found if isinstance(found, Task) else None
+
+    def issue(self, issue_id: str) -> Issue | None:
+        found = self.get("issues", issue_id)
+        return found if isinstance(found, Issue) else None
 
     def crossing_subject(self, task_id: str) -> dict[str, Any]:
         """What approving the crossing gate `task_id` authorizes, and nothing about when it runs.
@@ -1537,6 +1658,14 @@ class State:
             for k, v in value.items()
             if isinstance(v, dict) and isinstance(v.get("attempts_max"), int)
         }
+
+    @property
+    def task_unbundled(self) -> Mapping[str, str]:
+        """Sub-issues a failed bundle was split back into: task id → why. Each now runs alone."""
+        value = self.raw.get("tasks")
+        if not isinstance(value, dict):
+            return {}
+        return {k: _str(v, "unbundled") for k, v in value.items() if isinstance(v, dict) and _str(v, "unbundled")}
 
     @property
     def task_scope_added(self) -> Mapping[str, tuple[str, ...]]:
@@ -1852,6 +1981,16 @@ class Review:
     @property
     def extra_behaviors(self) -> tuple[Mapping[str, Any], ...]:
         return _maps(self.machine, "extra_behaviors")
+
+    @property
+    def local_decisions(self) -> tuple[Mapping[str, Any], ...]:
+        """What implementers decided without asking during this cycle, as the review was generated."""
+        return _maps(self.machine, "local_decisions")
+
+    @property
+    def observations(self) -> tuple[Mapping[str, Any], ...]:
+        """What readers confirming a fix saw beyond it and no repair has closed, as the review was generated."""
+        return _maps(self.machine, "observations")
 
     @property
     def review_findings(self) -> tuple[Mapping[str, Any], ...]:
@@ -2219,6 +2358,12 @@ class Config:
         """The branch acceptance integrates the work branch into (`project.mainline`)."""
         project = self.raw.get("project")
         return _str(project, "mainline") if isinstance(project, dict) else ""
+
+    @property
+    def language(self) -> str:
+        """What the documents the agents write are in (`project.language`); `en` when unset."""
+        project = self.raw.get("project")
+        return _str(project, "language", DEFAULT_LANGUAGE) if isinstance(project, dict) else DEFAULT_LANGUAGE
 
     @property
     def execution(self) -> Mapping[str, Any]:
@@ -2601,9 +2746,14 @@ def cross_reference_errors(plan: Plan) -> list[str]:
     errors: list[str] = []
 
     # ID shape and uniqueness, per section.
-    for section, kind in (("claims", "claim"), ("tasks", "task")):
+    sub_issues = [entry for issue in _maps(plan.raw, "issues") for entry in _maps(issue, "sub_issues")]
+    for section, kind, entries in (
+        ("claims", "claim", _maps(plan.raw, "claims")),
+        ("issues", "issue", _maps(plan.raw, "issues")),
+        ("tasks", "task", sub_issues),
+    ):
         seen: set[str] = set()
-        for entry in _maps(plan.raw, section):
+        for entry in entries:
             element_id = _str(entry, "id")
             if not ID_PATTERNS[kind].match(element_id):
                 errors.append(f"{section}: {element_id!r} does not match the {kind} id pattern")
@@ -2611,14 +2761,31 @@ def cross_reference_errors(plan: Plan) -> list[str]:
                 errors.append(f"{section}: duplicate id {element_id!r}")
             seen.add(element_id)
 
+    issue_ids = plan.ids("issues")
+    for issue in plan.issues:
+        if not issue.sub_issue_ids:
+            errors.append(f"issues/{issue.id}: has no sub-issues — an issue is only the bound on what they are")
+        for blocker in issue.blocked_by:
+            if blocker not in issue_ids:
+                errors.append(f"issues/{issue.id}: unknown blocked_by issue id {blocker!r}")
+            elif blocker == issue.id:
+                errors.append(f"issues/{issue.id}: blocked_by lists itself")
+
     task_ids = plan.ids("tasks")
     for task in plan.tasks:
         errors += _dangling(plan, "tasks", task.id, task.claim_ids, "claims", "claim")
-        for blocker in task.blocked_by:
+        holder = plan.issue(task.issue_id)
+        siblings = set(holder.sub_issue_ids) if holder is not None else set()
+        for blocker in task.own_blocked_by:
             if blocker not in task_ids:
                 errors.append(f"tasks/{task.id}: unknown blocked_by task id {blocker!r}")
             elif blocker == task.id:
                 errors.append(f"tasks/{task.id}: blocked_by lists itself")
+            elif blocker not in siblings:
+                errors.append(
+                    f"tasks/{task.id}: blocked_by {blocker!r} is in another issue — an edge across issues is "
+                    f"the issue's own blocked_by ({task.issue_id} on {_issue_of(plan, blocker)})"
+                )
         for path in (*task.scope_include, *task.scope_exclude):
             if not is_repo_path(path):
                 errors.append(f"tasks/{task.id}: scope path {path!r} is not a safe repo-relative path")
@@ -2778,8 +2945,20 @@ def _structure_errors(plan: Plan) -> list[str]:
                             needs[other.id] = f"{verb} {path}, which lies under {theirs} that {other.id} produces"
                             break
         for other_id, why in sorted(needs.items()):
-            errors.append(f"tasks/{task.id}: {why} — {task.id} has to depend on {other_id} (blocked_by)")
+            other_issue = _issue_of(plan, other_id)
+            fix = (
+                f"{task.id} has to depend on {other_id} (blocked_by)"
+                if other_issue == task.issue_id
+                else f"{task.issue_id} has to depend on {other_issue} (the issue's blocked_by)"
+            )
+            errors.append(f"tasks/{task.id}: {why} — {fix}")
     return errors
+
+
+def _issue_of(plan: Plan, task_id: str) -> str:
+    """The issue `task_id` belongs to, or "" when no issue holds it."""
+    task = plan.task(task_id)
+    return task.issue_id if task is not None else ""
 
 
 def _cycle_errors(plan: Plan) -> list[str]:

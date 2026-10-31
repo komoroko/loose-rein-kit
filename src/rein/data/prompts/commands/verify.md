@@ -24,7 +24,7 @@ approval** — this phase assembles the evidence and presents it.
    - **Smoke-step check**: if the deliverable is runnable (CLI, server, …) and `quality_gate`'s `smoke.run` is still empty, say so — the DoD ran without a launch check — and propose the command to fill in plus `required: true` (with it set, an empty run refuses to build at all).
    - **Always present a self-assessment as well** (contents: `.rein/prompts/rules/gate-workflow.md` "Gate self-assessment"), centered on release confidence and thinly-verified aspects, including the outcomes of spots that produced blocked/needs-revision.
 
-Write the deliverable (`docs/test/test-plan.md`) in the user's language.
+Write the deliverable (`docs/test/test-plan.md`) in the language `project.language` in `.rein/config.yaml` names (`en` when it is absent).
 
 ## Once approved
 - Only after an explicit human "approve": ask the human to run `rein approve acceptance` **themselves** — never for them, and **running the next command is not itself approval** (mechanics: AGENTS.md "Gate rules" 2). Declining is recorded as a change request, not lost — see step 0.

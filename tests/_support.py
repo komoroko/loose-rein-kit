@@ -178,20 +178,78 @@ def make_decision(
     return out
 
 
+def issue_of(task_id: str) -> str:
+    """The issue :func:`as_issues` puts `task_id` in: `T-007` → `I-007`."""
+    return "I-" + task_id.removeprefix("T-")
+
+
+def as_issues(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each task-shaped entry as the only sub-issue of an issue of its own.
+
+    A plan with one sub-issue per issue schedules exactly as the flat task list it is written as:
+    each `kind` moves to its issue, and each edge becomes the edge between the two issues. What a
+    test about grouping needs is :func:`make_issue` instead.
+    """
+    issues: list[dict[str, Any]] = []
+    for task in tasks:
+        sub = {k: v for k, v in task.items() if k not in ("kind", "blocked_by")}
+        issue: dict[str, Any] = {
+            "id": issue_of(str(task["id"])),
+            "title": f"issue {task['id']}",
+            "kind": task.get("kind", "parallel"),
+            "sub_issues": [sub],
+        }
+        if task.get("blocked_by"):
+            issue["blocked_by"] = [issue_of(str(t)) for t in task["blocked_by"]]
+        issues.append(issue)
+    return issues
+
+
+def make_issue(
+    issue_id: str = "I-001",
+    *,
+    sub_issues: list[dict[str, Any]],
+    kind: str = "parallel",
+    blocked_by: list[str] | None = None,
+    title: str = "",
+) -> dict[str, Any]:
+    """One issue holding `sub_issues` (task-shaped entries; a `kind` on them is dropped)."""
+    issue: dict[str, Any] = {
+        "id": issue_id,
+        "title": title or f"issue {issue_id}",
+        "kind": kind,
+        "sub_issues": [{k: v for k, v in sub.items() if k != "kind"} for sub in sub_issues],
+    }
+    if blocked_by:
+        issue["blocked_by"] = blocked_by
+    return issue
+
+
+def plan_tasks(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every sub-issue entry of a plan document, in order — the entries a test edits in place."""
+    return [sub for issue in plan["issues"] for sub in issue["sub_issues"]]
+
+
 def make_plan(
     *,
     cycle_id: str = DEMO_CYCLE,
     branch: str = DEMO_BRANCH,
     claims: list[dict[str, Any]] | None = None,
     tasks: list[dict[str, Any]] | None = None,
+    issues: list[dict[str, Any]] | None = None,
     decisions: list[dict[str, Any]] | None = None,
     lenses: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """A plan document. The default is one claim covering R-1 and one task answering it."""
+    """A plan document. The default is one claim covering R-1 and one task answering it.
+
+    `tasks` are written one sub-issue per issue (:func:`as_issues`); `issues` are taken as given.
+    """
+    if issues is None:
+        issues = as_issues(tasks if tasks is not None else [make_task(claim_ids=["C-001"])])
     plan: dict[str, Any] = {
         "cycle": {"id": cycle_id, "base_commit": DEMO_COMMIT, "branch": branch},
         "claims": claims if claims is not None else [make_claim()],
-        "tasks": tasks if tasks is not None else [make_task(claim_ids=["C-001"])],
+        "issues": issues,
     }
     if decisions is not None:
         plan["decisions"] = decisions

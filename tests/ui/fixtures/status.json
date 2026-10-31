@@ -117,7 +117,16 @@
         ],
         "fan_out": 2,
         "handoff": {},
-        "commit": ""
+        "commit": "",
+        "issue": "I-001",
+        "irreversible": false,
+        "unbundled": "",
+        "acceptance": [
+          {
+            "id": "A-1",
+            "statement": "T-001 does what its ticket says"
+          }
+        ]
       },
       {
         "id": "T-002",
@@ -133,7 +142,16 @@
         ],
         "fan_out": 1,
         "handoff": {},
-        "commit": ""
+        "commit": "",
+        "issue": "I-001",
+        "irreversible": false,
+        "unbundled": "",
+        "acceptance": [
+          {
+            "id": "A-1",
+            "statement": "T-002 does what its ticket says"
+          }
+        ]
       },
       {
         "id": "T-003",
@@ -149,7 +167,16 @@
         ],
         "fan_out": 0,
         "handoff": {},
-        "commit": ""
+        "commit": "",
+        "issue": "I-002",
+        "irreversible": false,
+        "unbundled": "",
+        "acceptance": [
+          {
+            "id": "A-1",
+            "statement": "T-003 does what its ticket says"
+          }
+        ]
       },
       {
         "id": "T-004",
@@ -165,7 +192,16 @@
         ],
         "fan_out": 1,
         "handoff": {},
-        "commit": ""
+        "commit": "",
+        "issue": "I-001",
+        "irreversible": true,
+        "unbundled": "",
+        "acceptance": [
+          {
+            "id": "A-1",
+            "statement": "T-004 does what its ticket says"
+          }
+        ]
       },
       {
         "id": "T-005",
@@ -179,7 +215,16 @@
         ],
         "fan_out": 0,
         "handoff": {},
-        "commit": ""
+        "commit": "",
+        "issue": "I-003",
+        "irreversible": false,
+        "unbundled": "the bundle it was in stayed red",
+        "acceptance": [
+          {
+            "id": "A-1",
+            "statement": "T-005 does what its ticket says"
+          }
+        ]
       },
       {
         "id": "T-006",
@@ -195,8 +240,79 @@
         ],
         "fan_out": 0,
         "handoff": {},
-        "commit": ""
+        "commit": "",
+        "issue": "I-004",
+        "irreversible": false,
+        "unbundled": "",
+        "acceptance": [
+          {
+            "id": "A-1",
+            "statement": "T-006 does what its ticket says"
+          }
+        ]
       }
+    ],
+    "issues": [
+      {
+        "id": "I-001",
+        "title": "the retry path",
+        "kind": "foundation",
+        "status": "awaiting-evidence",
+        "blocked_by": [],
+        "sub_issues": [
+          "T-001",
+          "T-002",
+          "T-004"
+        ]
+      },
+      {
+        "id": "I-002",
+        "title": "the report",
+        "kind": "parallel",
+        "status": "blocked",
+        "blocked_by": [
+          "I-001"
+        ],
+        "sub_issues": [
+          "T-003"
+        ]
+      },
+      {
+        "id": "I-003",
+        "title": "the export",
+        "kind": "parallel",
+        "status": "needs-revision",
+        "blocked_by": [],
+        "sub_issues": [
+          "T-005"
+        ]
+      },
+      {
+        "id": "I-004",
+        "title": "the cutover",
+        "kind": "integration",
+        "status": "todo",
+        "blocked_by": [
+          "I-001"
+        ],
+        "sub_issues": [
+          "T-006"
+        ]
+      }
+    ],
+    "issue_layers": [
+      [
+        "I-001",
+        "I-003"
+      ],
+      [
+        "I-002",
+        "I-004"
+      ]
+    ],
+    "issue_critical_path": [
+      "I-001",
+      "I-002"
     ]
   },
   "trace": {

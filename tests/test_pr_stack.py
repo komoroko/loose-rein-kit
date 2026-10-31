@@ -21,6 +21,7 @@ from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import (
     DEMO_CYCLE,
+    as_issues,
     bind_review,
     make_config,
     make_plan,
@@ -178,6 +179,43 @@ def test_one_slice_per_landed_task_in_landing_order(cycle: Callable[..., dict[st
     assert [s.head_sha for s in slices] == [bundle["landed"][t] for t in ("T-001", "T-002", "T-003")]
 
 
+def _as_one_bundle(bundle: dict[str, Any], members: tuple[str, ...]) -> str:
+    """Record `members` as landed in the last one's commit — what a launch carrying them all leaves."""
+    repo = bundle["repo"]
+    commit = str(bundle["landed"][members[-1]])
+    raw = store_mod.Store(repo).read_raw("state")
+    assert raw is not None
+    for task_id in members:
+        raw["tasks"][task_id]["completed_commit"] = commit
+    repo.state.write_bytes(store_mod.dump_yaml(raw))
+    return commit
+
+
+def test_a_bundle_the_chain_records_is_one_slice_delivering_every_member(
+    cycle: Callable[..., dict[str, Any]],
+) -> None:
+    bundle = cycle()
+    commit = _as_one_bundle(bundle, ("T-002", "T-003"))
+    landed = event_chain.make("bundle_landed", DEMO_CYCLE, subject_ids=("T-002", "T-003"), detail={"commit": commit})
+
+    slices = derive(bundle, [landed])
+
+    assert [s.delivers for s in slices] == [("T-001",), ("T-002", "T-003")]
+    assert slices[1].task_id == "T-002" and slices[1].head_sha == commit
+    assert "T-002, T-003" in slices[1].title
+    assert body(bundle, 1, [landed]).startswith(f"## T-002 — {slices[1].title}")
+
+
+def test_two_tasks_on_one_commit_with_no_bundle_in_the_chain_are_still_refused(
+    cycle: Callable[..., dict[str, Any]],
+) -> None:
+    bundle = cycle()
+    _as_one_bundle(bundle, ("T-002", "T-003"))
+
+    with pytest.raises(pr_stack.StackError, match="One commit cannot be two pull requests"):
+        derive(bundle, [])
+
+
 def test_each_slice_is_based_on_the_one_below_it(cycle: Callable[..., dict[str, Any]]) -> None:
     slices = derive(cycle())
 
@@ -288,7 +326,10 @@ def test_new_work_after_an_opened_slice_becomes_a_new_slice(cycle: Callable[...,
     plan = store.read_plan()
     assert plan is not None
     plan_document = dict(plan.raw)
-    plan_document["tasks"] = [*plan_document["tasks"], make_task("T-003", kind="parallel", claim_ids=["C-001"])]
+    plan_document["issues"] = [
+        *plan_document["issues"],
+        *as_issues([make_task("T-003", kind="parallel", claim_ids=["C-001"])]),
+    ]
     repo.plan.write_bytes(store_mod.dump_yaml(plan_document))
     repo.state.write_bytes(store_mod.dump_yaml(document))
 
@@ -650,7 +691,10 @@ def _replace_task_acceptance(bundle: dict[str, Any], task_id: str, acceptance: l
     plan = store_mod.Store(repo).read_plan()
     assert plan is not None
     document = dict(plan.raw)
-    document["tasks"] = [{**t, "acceptance": acceptance} if t["id"] == task_id else t for t in document["tasks"]]
+    document["issues"] = [
+        {**i, "sub_issues": [{**t, "acceptance": acceptance} if t["id"] == task_id else t for t in i["sub_issues"]]}
+        for i in document["issues"]
+    ]
     repo.plan.write_bytes(store_mod.dump_yaml(document))
 
 

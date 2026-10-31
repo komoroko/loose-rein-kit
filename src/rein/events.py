@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from rein import common, cycle, event_chain, models, run_record
 from rein import repo as repo_mod
@@ -207,6 +208,66 @@ def premise_outcomes(events: Sequence[models.Event]) -> dict[str, int]:
         if event.event == "decision_declared" and detail.get("kind") == "premise_falsified":
             counts["with_fallback" if detail.get("fallback") else "without_fallback"] += 1
     return counts
+
+
+def local_decisions(events: Sequence[models.Event], cycle_id: str) -> list[dict[str, Any]]:
+    """Every local decision an implementer recorded in this cycle, oldest first.
+
+    Read from the chain, never from a document an agent wrote: a decision is not asked, so this
+    list is the only place it reaches anyone — the tasks built on it (the dossier) and the human
+    who may overrule it (the acceptance gate). `task` is the attempt that recorded it; `id` is
+    derived from the recording event, so it is the same in every review generated over the cycle.
+    `overruled` is whether a human has since overruled it (`decision_overruled`).
+    """
+    overruled = {
+        subject
+        for event in events
+        if event.cycle_id == cycle_id and event.event == "decision_overruled"
+        for subject in event.subject_ids
+    }
+    found: list[dict[str, Any]] = []
+    for event in events:
+        detail = event.detail if isinstance(event.detail, Mapping) else {}
+        if event.cycle_id != cycle_id or event.event != "decision_declared":
+            continue
+        if detail.get("kind") != models.LOCAL_DECISION:
+            continue
+        decision_id = models.local_decision_id(event.id)
+        found.append(
+            {
+                "id": decision_id,
+                "task": event.subject_ids[0] if event.subject_ids else "",
+                **{name: str(detail.get(name, "")) for name in models.LOCAL_DECISION_FIELDS},
+                "overruled": decision_id in overruled,
+            }
+        )
+    return found
+
+
+def open_observations(events: Sequence[models.Event], cycle_id: str) -> list[dict[str, str]]:
+    """What readers confirming a fix saw beyond it this cycle, and no repair has closed, oldest first."""
+    repaired = {
+        subject
+        for event in events
+        if event.cycle_id == cycle_id and event.event == "observation_repaired"
+        for subject in event.subject_ids
+    }
+    found: list[dict[str, str]] = []
+    for event in events:
+        if event.cycle_id != cycle_id or event.event != "finding_observed":
+            continue
+        detail = event.detail if isinstance(event.detail, Mapping) else {}
+        observation_id = models.observation_id(event.id)
+        if observation_id in repaired:
+            continue
+        found.append(
+            {
+                "id": observation_id,
+                "seen_in": ",".join(event.subject_ids),
+                **{name: str(detail.get(name, "")) for name in ("severity", "statement", "anchor")},
+            }
+        )
+    return found
 
 
 def stop_durations(events: Sequence[models.Event]) -> list[float]:

@@ -4,6 +4,150 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.16.0] - 2026-10-29
+
+**A minor release: the format moves to `rein-grounded-v14`, and there is no migration for a cycle in
+flight.** `plan.yaml`'s `tasks` is replaced by `issues`, each holding its `sub_issues`, so a plan
+written by 0.15.0 does not read: finish a running cycle on 0.15.0, or `rein revise --to mandate` and
+re-cut its tasks into issues. A repository between cycles needs `rein sync --force`. `state.yaml`
+gains a sub-issue's `unbundled`, the event log gains `bundle_landed`, `bundle_split`,
+`decision_overruled`, `finding_observed` and `observation_repaired`, `review.yaml`'s machine half
+gains `local_decisions` and `observations`, and `config.yaml` gains `project.language`. **`rein
+decision add` no longer takes `--risk`** and requires `--rationale`, `--undo` and `--anchor`.
+Twenty-five change requests (CR-81 to CR-105).
+
+- **The plan has two levels: issues, and the sub-issues a human approves (CR-81).** A sub-issue is
+  what a task was, less its place in the DAG: scope, criteria, claims and irreversible declarations,
+  frozen with the mandate, and the unit findings are charged to. An issue (`I-NNN`) carries `kind`
+  and the edges to other issues, which every one of its sub-issues waits on; a sub-issue's own
+  `blocked_by` names only its siblings, and an edge into another issue is refused with the issue edge
+  to write instead. Sub-issue ids stay `T-NNN`, and so do their tickets and crossing gates. A ticket
+  per issue was considered and not taken: a crossing binds its ticket's digest, and a shared document
+  would have asked for that approval again whenever a sibling's section moved.
+- **The loop decides how an issue's sub-issues share a launch (CR-82, CR-104).** A *bundle* is a
+  contiguous run of one issue's sub-issues, in plan order, that are `todo`, are not carried by
+  another launch of the same batch, and wait on nothing outside it that is not done: one worktree,
+  one implementer launch, one gate over all their criteria, one commit. A batch runs in frontier
+  order, not plan order, and a lead earlier in the plan once took siblings a later lead had already
+  taken, launching them twice. Never bundled: a sub-issue that crosses an irreversible point, has
+  `operate` or `requires`, is produced by a person, or was split from a bundle before. Grouping
+  changes nothing anybody approved, so it is not frozen and moves no gate. The implementer is handed
+  every member's ticket; each member's criteria are named `T-NNN/A-n` inside the bundle and come
+  back under their own ids when it lands, and `bundle_landed` records which sub-issues one commit
+  carries.
+- **A bundle that does not land is split, not judged (CR-83).** A red gate, a refusal before it, a
+  merge that will not go, or a red join sends every member back to `todo` with `unbundled` saying
+  why; none is `blocked`, and the lead's handoff goes with the bundle, so a fresh launch at it alone
+  does not inherit its siblings' failure. The bundle's branch is kept under `-bundle-<stamp>` rather
+  than salvaged into the lead's next attempt. Each sub-issue is then decided by its own launch.
+  Acceptance lists every sub-issue that ran alone after a split (`split_from_bundles`), and `rein
+  events --cost` says how many bundles split and how many sub-issues ran again.
+- **A bundle is one slice of the stack (CR-84).** `rein pr-stack` accepts several sub-issues on one
+  `completed_commit` when the chain's `bundle_landed` says one launch carried them, and the slice
+  names the issue and every member; without that record it is refused as before. A repair at
+  acceptance lands on the slice of the bundle its finding's sub-issue rode in. A slice per issue was
+  not taken: parallel issues land interleaved on the work branch, so one issue's commits are not a
+  contiguous run, and cutting them so would rewrite the history every receipt binds.
+- **Issues are mirrored as GitHub issues with sub-issues (CR-85).** `rein issue-sync` creates each
+  issue, then each sub-issue under it (`gh issue create --parent`), and moves a sub-issue back under
+  its issue when GitHub has it elsewhere. An issue closes when every sub-issue is done. It needs gh
+  2.103 or later and stops before creating anything on an older one: a mirror with the hierarchy
+  missing would show the work flat and say nothing.
+- **The Board opens an issue onto its sub-issues (CR-86).** The graph and the layer bars are drawn at
+  the issue level; an issue opens onto its sub-issues with status, criteria, whether each may share a
+  launch, and the commit it landed in, and a sub-issue opens onto its detail, criteria included.
+  Picking a sub-issue from the frontier or the trace opens its issue too, and what is open survives
+  the stream re-rendering the page.
+- **The documents are written in a language the repository chose (CR-87).** `project.language` in
+  `config.yaml` (a BCP 47 tag, `en` by default) is what `docs/**` and the plan's prose are written in.
+  `rein init` asks for it after the name and the brief, Enter meaning `en`, and takes `--language`
+  otherwise; a value that is not a tag is refused before anything is written. The prompts used to say
+  "the user's language", which made one repository's documents change language with whoever was
+  typing. Conversation stays in the person's language, and what the code prints stays English. **A
+  repository that wrote its documents in another language reads `en` once it upgrades**: set
+  `project.language: ja` (or its tag) in `config.yaml`.
+- **The sentences rein hands an agent are tested against a control (CR-88, CR-89, CR-94 to CR-105).**
+  `evals/` holds behaviour tests: each scenario builds a repository, hands a real agent CLI the prompt
+  rein would, and reads what the launch left — the `rein` calls a stub on PATH records, the files, the
+  findings file — never a model's opinion of it. It runs in two arms, with and without the one sentence
+  it guards. `make eval EVAL_WHERE="--host" EVAL_MODEL=<model>` (or `--profile <oci-agent profile>`)
+  runs them; they are not part of `check` or CI.
+  **A record is about the launch it measured.** Its key is each arm's launch digest (the command,
+  the prompt and every file of the repository handed over), the scenario's digest (its fixture and
+  its score), the model, the CLI's version, where it ran and `--timeout`, and `template_lint`
+  rebuilds the launches without running them and refuses a record that no longer matches, or whose
+  scenario is gone.
+  **The arms are judged by a one-sided Fisher exact test**, at 0.025 on each of at most two looks. A
+  run adds the scenario's own five trials per arm to the record of the same key instead of replacing
+  it, `--trials` is gone, and a key with a verdict (`holds`, `not-reproduced`, `does-not-hold`) is not
+  run again: more trials would be choosing a sample. **A run that stops keeps what it took**: each
+  trial is written to the record's `pending` as it ends, a launch that fails or an interrupt is
+  written to `aborted` with its arm before the run stops, and the next run of the same key fills the
+  rest instead of starting over. Before, a usage limit or a timeout threw away every trial of the
+  run, and stopping a run and starting it again drew those trials afresh. A launch that runs past
+  `--timeout` is a trial, scored on what it left by then and named in `timed_out`: running long is
+  something an arm does, and drawing it again until it finished in time would choose the sample. The
+  record is written beside itself and moved over, so an interrupt mid-write keeps the record it had.
+  A record with a `pending` run, or with a key that lacks a field, is refused by `template_lint`.
+  **`evals/inventory.yaml` names what holds each instruction.** A section is `unverified`, `none` (it
+  asks an agent for nothing), or a list of `held` sentences, each `by` a scenario whose every record
+  `holds` or by a unit test (`tests/<file>::<function>`) showing the code refuse the violation, with a
+  `rest` for everything else. A bare `code` is refused; so is a held sentence not in its section once.
+  **A launch carries nothing of the operator's but the login.** The CLI is started in safe mode with
+  no setting sources, so the operator's `CLAUDE.md`, rules, language, output style and permission
+  mode stay out of it; before, they reached every launch and none was in the key. An operator rule
+  that prefixes `PATH` sent agents past the stub to the installed `rein`, and those trials were
+  scored as the sentence failing. **Each trial's transcript is kept** under `evals/transcripts/`
+  (not committed), with its score and its `rein` calls, for as long as the record it counts in; the
+  CLI no longer keeps a copy of its own. The stub is allowed under every name it answers to: an agent
+  that called `.evalbin/rein` by path was refused, and its report counted as none. **The harness's
+  allowlist lets a launch read a change and run its gate**: with the operator's permission mode out,
+  it was all a launch got, and trials refused a `git ls-tree`, a `git -C <the trial>` or the
+  scenario's `python -m pytest` were scored against the sentence. Read-only git verbs, each git verb
+  the list allows against the trial's repository by its path (never `-C` alone), the gate, and
+  `head`, `tail`, `wc`, `echo` and `which` are allowed now.
+  Every record was measured again on isolated launches with that allowlist, under a key that holds
+  `--timeout` (900 seconds; no launch ran past it). Four scenarios hold on `claude-opus-5-5`: a
+  reviewer of a sound change writes an empty list, a confirming reader closes a correct fix, a
+  resolver of two tasks that cannot both hold reports `needs-revision`, and a repairer fixes the
+  cause rather than the line the finding named, each 5/5 against 0/5. The sentence telling an
+  implementer to report a criterion that needs a path outside its scope before doing the work is
+  gone from `implementer.md`, with its scenario: without it, agents reported `needs-revision` every
+  time, whether the path was in the criterion's own words or implied by the test file its check
+  runs. The rest of the document already says a scope change is a human's. The sentence telling an
+  implementer to make, record and go on with a choice the ticket leaves open stays gone: measured
+  again on isolated launches, agents recorded the choice and went on in every trial without it (5/5
+  against 4/5 with it).
+  `implementer.md` also said a run that ends without `rein report` is treated as a failed attempt. It
+  is judged on its diff: an empty one fails, any other goes to the gate. The sentence says so now.
+- **What an implementer decides is sorted by what overruling it would move, not by how much it
+  matters (CR-90).** `rein decision add --risk` parked the task for a human at `medium` and above, on
+  a risk the implementer chose and that no prompt explained. A decision that would move a claim, the
+  scope or a criterion is a defect in the plan and leaves through `rein report --outcome
+  needs-revision`; every other one is made, recorded with why and what overruling it would redo, and
+  the task goes on.
+- **Acceptance lists every decision made without asking, and any can be overruled (CR-91).** The
+  review carries the cycle's standing local decisions (`machine.local_decisions`, from the chain), the
+  residue names them, and the decision screen offers one act on each: overrule it, saying what it
+  should be instead. An overruled decision holds the gate until `rein build` has repaired the code it
+  shaped — at its cause, with a test that fails before — and then it is recorded in the chain as the
+  person's (`decision_overruled`), counted as `reach_overruled` `too_local`, and listed by `rein
+  decisions`.
+- **A task is handed what the tasks under it decided (CR-92).** The dossier carries
+  `upstream_decisions`: every local decision recorded by a task this one stands on, transitively.
+- **After a fix, the reading confirms it instead of reading the change again (CR-93).** A sent-back
+  task, and a join sent to the integration fixer, used to be read whole a second time, so a reader's
+  variance could raise something new in code the fix never touched and spend the task's rounds on it.
+  The next reading is handed the findings and the fix (`git diff <head the first reading saw>..`), gives
+  each finding a verdict, and looks for breakage inside the fix only. What it sees beyond the fix is
+  recorded (`finding_observed`), carried by the review (`machine.observations`) and repaired at
+  acceptance like a finding, without spending the task's rounds. Each confirmation is a
+  `reviews_applied` reading with `confirm: true` and the count it saw beyond the fix, zero included.
+  What the join's first reading said beside its must-fix findings is filed once the join is confirmed,
+  since no later reading says it again. Acceptance's own repair rounds still
+  read the moved reading whole: that reading is acceptance's discovery, and what it finds already
+  reaches the person at the gate.
+
 ## [0.15.0] - 2026-10-26
 
 **A minor release: the format moves to `rein-grounded-v13`, and every repository needs `rein sync

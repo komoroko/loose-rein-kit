@@ -331,6 +331,7 @@ th {
 }
 tr.clk { cursor: pointer; }
 tr.clk:hover td { background: var(--sheet-2); }
+tr.picked td { background: var(--sheet-2); box-shadow: inset 3px 0 0 var(--ink); }
 
 /* The Console's role→adapter table: controls sit on the text baseline of the role they belong to,
    and the last column hugs its button rather than stretching to the page. */

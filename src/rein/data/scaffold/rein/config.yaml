@@ -13,6 +13,7 @@ project:
   name: product
   work_branch: build/product   # `rein init --name X` rewrites this to build/X
   mainline: main   # what acceptance integrates the work branch into
+  language: en     # what docs/** and the plan's prose are written in (a BCP 47 tag; `rein init --language`)
 
 execution:
   max_parallel: 3            # concurrent independent leaf tasks within the frontier

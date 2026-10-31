@@ -206,6 +206,12 @@
               "maxLength": 512
             }
           },
+          "unbundled": {
+            "description": "Why the bundle this sub-issue was launched in was split: a bundle's failure is no verdict about any one of its sub-issues, so each is launched alone from then on and its own launch decides it. Written by the loop with a `bundle_split` event; cleared only by a roll back that re-cuts the plan.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
           "note": {
             "type": "string",
             "maxLength": 1000

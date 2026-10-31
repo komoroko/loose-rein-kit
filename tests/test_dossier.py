@@ -11,7 +11,10 @@ prompt.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+
+import pytest
 
 from rein import dag, diff_facts, dossier, models
 from tests._support import make_claim, make_plan
@@ -171,3 +174,52 @@ def test_the_implementer_is_told_what_the_loop_will_run_and_not_to_run_it() -> N
     assert document["operate"]["steps"] == [{"name": "full-run", "command": ["uv", "run", "python", "tools/run.py"]}]
     assert "do not run them" in document["operate"]["note"]
     assert "operate" not in dossier.build(task(), plan=None, repo_path=lambda rel: Path(rel))
+
+
+def test_the_dossier_carries_the_upstream_decisions_only_when_there_are_some(tmp_path: Path) -> None:
+    decided = {"id": "e-1", "task": "T-000", "statement": "s", "rationale": "r", "undo": "u", "anchor": "a:1"}
+    with_them = dossier.build(task(), plan=None, repo_path=lambda rel: tmp_path / rel, upstream_decisions=[decided])
+    without = dossier.build(task(), plan=None, repo_path=lambda rel: tmp_path / rel)
+    assert with_them["upstream_decisions"] == [decided]
+    assert "upstream_decisions" not in without
+
+
+_SENT = {"T-001": [{"severity": "must_fix", "statement": "drops the guard", "anchor": "a.py:1"}]}
+
+
+def test_a_confirmation_names_what_is_still_open_what_the_fix_broke_and_what_lies_beyond_it() -> None:
+    raw = json.dumps(
+        {
+            "tasks": {
+                "T-001": {
+                    "confirm": [{"finding": 1, "closed": False, "why": "the guard is still gone"}],
+                    "findings": [{"severity": "must_fix", "statement": "the fix leaks a handle", "anchor": "a.py:9"}],
+                    "outside": [{"severity": "question", "statement": "is b.py meant to retry?", "anchor": "b.py:3"}],
+                }
+            }
+        }
+    )
+    confirmed, missing = dossier.parse_confirmation(raw, _SENT)
+    assert missing == []
+    answer = confirmed["T-001"]
+    assert answer.open == [{**_SENT["T-001"][0], "why_open": "the guard is still gone"}]
+    assert [f["statement"] for f in answer.new] == ["the fix leaks a handle"]
+    assert [f["anchor"] for f in answer.outside] == ["b.py:3"]
+
+
+@pytest.mark.parametrize(
+    ("confirm", "says"),
+    [
+        ([], "no verdict on finding(s) 1"),
+        ([{"finding": 2, "closed": True}], "not one of 1..1"),
+        ([{"finding": 1, "closed": "yes"}], "boolean `closed`"),
+    ],
+)
+def test_a_confirmation_that_leaves_a_finding_without_a_verdict_is_refused(confirm: list[object], says: str) -> None:
+    """Silence is neither closed nor open: as closed it lets a defect land, as open it spends a round."""
+    with pytest.raises(dossier.FindingsError, match=re.escape(says)):
+        dossier.parse_confirmation(json.dumps({"tasks": {"T-001": {"confirm": confirm}}}), _SENT)
+
+
+def test_a_confirmation_with_no_entry_for_a_subject_names_it() -> None:
+    assert dossier.parse_confirmation(json.dumps({"tasks": {}}), _SENT) == ({}, ["T-001"])

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from rein import cycle, init_cmd
+from rein import cycle, data, init_cmd, models
 from rein import lock as lock_mod
 
 _STATE = """---
@@ -313,7 +313,7 @@ def test_main_greenfield_flag_overrides_detection(tmp_path: Path, capsys: pytest
     assert "- src/" in config  # code paths stay guarded (greenfield semantics)
 
 
-def test_wizard_asks_only_name_and_brief(
+def test_wizard_asks_only_name_brief_and_language(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     prompts: list[str] = []
@@ -328,11 +328,14 @@ def test_wizard_asks_only_name_and_brief(
     proj = tmp_path / "myproduct"
     proj.mkdir()
     assert init_cmd.wizard(proj) == 0
-    # Only two questions are posed up front: the product name (defaulting to the folder) and the
-    # brief. The surface and the sandbox are asked during the run, each with a default — which is
-    # why neither prompt carries an "n of N": whether those two are asked at all depends on what
-    # the seeded config turns out to say, so any count printed here would be a guess.
+    # Only three questions are posed up front: the product name (defaulting to the folder), the
+    # brief, and the language the documents are written in (defaulting to en). The surface and the
+    # sandbox are asked during the run, each with a default — which is why neither prompt carries an
+    # "n of N": whether those two are asked at all depends on what the seeded config turns out to
+    # say, so any count printed here would be a guess.
     assert any("product name" in p for p in prompts)
+    assert any("language" in p and "[en]" in p for p in prompts)
+    assert "  language: en " in (proj / ".rein" / "config.yaml").read_text(encoding="utf-8")
     assert not any("work branch" in p or "source URL" in p or "headless" in p for p in prompts)
     assert not any(re.search(r"\d/\d", p) for p in prompts)
     out = capsys.readouterr().out
@@ -342,6 +345,62 @@ def test_wizard_asks_only_name_and_brief(
     assert 'project: "myproduct"' in state
     data = lock_mod.read(proj / ".rein" / "rein.lock")
     assert data is not None and lock_mod.source_of(data) == "git+https://example.com/rein@vX"
+
+
+def _answers(monkeypatch: pytest.MonkeyPatch, *answers: str | type[BaseException]) -> list[str]:
+    """Feed the wizard `answers` in order (an exception class is raised as Ctrl+C would be), then Enter."""
+    prompts: list[str] = []
+    queue = list(answers)
+
+    def fake_input(prompt: str = "") -> str:
+        prompts.append(prompt)
+        answer = queue.pop(0) if queue else ""
+        if isinstance(answer, type):
+            raise answer()
+        return answer
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr(init_cmd, "detect_source", lambda: "")
+    monkeypatch.setattr(init_cmd, "detect_agent", lambda _root: None)
+    return prompts
+
+
+def test_the_wizard_asks_the_language_again_until_it_is_a_tag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prompts = _answers(monkeypatch, "", "", "日本語", "ja")
+    assert init_cmd.wizard(tmp_path) == 0
+    assert sum("language" in p for p in prompts) == 2
+    assert "is not a language tag" in capsys.readouterr().out
+    config = models.Config.parse((tmp_path / ".rein" / "config.yaml").read_text(encoding="utf-8"))
+    assert config.language == "ja"
+
+
+def test_interrupting_the_language_question_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _answers(monkeypatch, "", "", KeyboardInterrupt)
+    assert init_cmd.wizard(tmp_path) == 130
+    assert not (tmp_path / ".rein").exists()
+
+
+def test_the_language_is_a_flag_and_a_bad_one_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    good, bad = tmp_path / "good", tmp_path / "bad"
+    good.mkdir()
+    bad.mkdir()
+    assert init_cmd.main(["--name", "demo", "--language", "pt-BR", "--repo", str(good)]) == 0
+    assert models.Config.parse((good / ".rein" / "config.yaml").read_text(encoding="utf-8")).language == "pt-BR"
+    assert init_cmd.main(["--name", "demo", "--language", "japanese please", "--repo", str(bad)]) == 2
+    assert "not a language tag" in capsys.readouterr().err
+    assert not (bad / ".rein").exists()
+
+
+def test_a_config_with_no_language_is_english_and_one_with_a_bad_one_is_refused() -> None:
+    text = data.read_text("scaffold/rein/config.yaml")
+    assert models.Config.parse(text).language == "en"
+    assert models.Config.parse(text.replace("  language: en ", "  #language: en ")).language == "en"
+    with pytest.raises(models.DocumentError, match="language"):
+        models.Config.parse(text.replace("  language: en ", "  language: 日本語 "))
 
 
 # --- sandboxing is part of initialization -----------------------------------------

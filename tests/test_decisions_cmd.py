@@ -246,3 +246,32 @@ def test_the_command_prints_the_history(repo: repo_mod.Repo, capsys: pytest.Capt
 
 def test_no_repository_is_an_error_not_an_empty_history(tmp_path: Path) -> None:
     assert decisions_cmd.main(["--repo", str(tmp_path / "nowhere")]) == 1
+
+
+def test_what_an_implementer_decided_and_what_a_person_overruled_are_on_record(repo: repo_mod.Repo) -> None:
+    """The build's decisions were recorded only in the chain, and the chain is the one record that
+    outlives the cycle. An overruled one is listed as the person's: overruling it was their decision."""
+    decided: dict[str, object] = {
+        "kind": models.LOCAL_DECISION,
+        "statement": "retry 3 times",
+        "rationale": "r",
+        "undo": "u",
+        "anchor": "a:1",
+    }
+    first = event_chain.link(
+        None, event_chain.make("decision_declared", "live", subject_ids=("T-001",), detail=decided)
+    )
+    second = event_chain.link(
+        first, event_chain.make("decision_declared", "live", subject_ids=("T-002",), detail=decided)
+    )
+    overrule = event_chain.make(
+        "decision_overruled", "live", subject_ids=(models.local_decision_id(second.id), "T-002")
+    )
+    _write_chain(repo.events, [first, second, event_chain.link(second, overrule)])
+
+    [live] = decisions_cmd.history(repo)[0]
+
+    assert [(d.where, d.status, d.summary) for d in live.decisions] == [
+        ("build", "loop", "retry 3 times [T-001]"),
+        ("overruled", "human", "retry 3 times [T-002]"),
+    ]

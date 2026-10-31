@@ -3629,6 +3629,77 @@ def test_the_integration_reviewer_reads_the_join_and_not_the_cycle(
     assert f"git diff {'c' * 40}..HEAD" in prompts[0]
 
 
+def test_after_the_join_s_fix_the_reader_confirms_the_findings_and_reads_only_the_fix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """devr 論点 S, over the merged tree. The second reading is handed what the fixer was sent and the
+    fix since the head the first reading saw; what it sees beyond the fix goes to the chain."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(common, "run", fake_git())
+    step = build_loop.GateStep(name="review", kind="agent", agent_role="reviewer", stage="integration", retries=1)
+    heads = iter(["1" * 40, "2" * 40])
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: next(heads))
+    fixed: list[str] = []
+    monkeypatch.setattr(loop, "_invoke_integration_fixer", lambda tasks, prompt: fixed.append(prompt))
+    prompts: list[str] = []
+    target = dossier.findings_path(loop.root, "integration")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    first = {"findings": [{"severity": "must_fix", "statement": "two owners of the cache", "anchor": "src/c.py:4"}]}
+    second = {
+        "tasks": {
+            "join": {
+                "confirm": [{"finding": 1, "closed": True, "why": "one owner now"}],
+                "findings": [],
+                "outside": [{"severity": "must_fix", "statement": "stale import", "anchor": "src/d.py:1"}],
+            }
+        }
+    }
+
+    def answer(argv: list[str], **_kw: object) -> None:
+        prompts.append(argv[-1])
+        target.write_text(json.dumps(first if len(prompts) == 1 else second), encoding="utf-8")
+
+    monkeypatch.setattr(loop, "_launch", answer)
+    loop._run_integration_agent_step(step, [dag.Task(id="T-001", title="t", kind="parallel")], "c" * 40)
+
+    assert len(fixed) == 1 and "two owners of the cache" in fixed[0]
+    assert "You are confirming whether a fix closed" in prompts[1]
+    assert f"git diff {'1' * 40}..HEAD" in prompts[1], "the fix, from the head the first reading saw"
+    assert "1. src/c.py:4: two owners of the cache" in prompts[1]
+    [observed] = events_mod.open_observations(store_mod.Store(loop.repo).read_events(), loop.cycle_id)
+    assert observed["statement"] == "stale import" and observed["seen_in"] == "T-001"
+    applied = [e.detail for e in store_mod.Store(loop.repo).read_events() if e.event == "reviews_applied"]
+    assert [(d.get("confirm", False), d.get("outside")) for d in applied] == [(False, None), (True, 1)]
+
+
+def test_what_the_first_reading_of_the_join_said_beside_its_must_fix_findings_is_filed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A confirming round reads only the fix, so a non-blocking finding the first reading made next
+    to a must-fix one is never said again. Filing only the last round's findings dropped it."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(common, "run", fake_git())
+    step = build_loop.GateStep(name="review", kind="agent", agent_role="reviewer", stage="integration", retries=1)
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "1" * 40)
+    monkeypatch.setattr(loop, "_invoke_integration_fixer", lambda tasks, prompt: None)
+    filed: list[Mapping[str, Any]] = []
+    monkeypatch.setattr(loop, "_file_integration_findings", lambda findings, tasks: filed.extend(findings))
+    target = dossier.findings_path(loop.root, "integration")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    note = {"severity": "question", "statement": "the retry count is unexplained", "anchor": "src/r.py:9"}
+    first = {"findings": [{"severity": "must_fix", "statement": "two owners", "anchor": "src/c.py:4"}, note]}
+    second = {"tasks": {"join": {"confirm": [{"finding": 1, "closed": True}], "findings": [], "outside": []}}}
+    answers = iter([first, second])
+
+    def answer(argv: list[str], **_kw: object) -> None:
+        target.write_text(json.dumps(next(answers)), encoding="utf-8")
+
+    monkeypatch.setattr(loop, "_launch", answer)
+    loop._run_integration_agent_step(step, [dag.Task(id="T-001", title="t", kind="parallel")], "c" * 40)
+
+    assert [f["statement"] for f in filed] == ["the retry count is unexplained"]
+
+
 def _committed_build_repo(tmp_path: Path) -> Path:
     """`build_repo` in a git repository whose tree is clean — what the loop requires to start.
 
@@ -4666,3 +4737,86 @@ def test_a_repair_that_changed_nothing_is_not_landed_as_one(tmp_path: Path, monk
     _repair_controlled(loop, monkeypatch)
     result, said = loop._verify_repair(_task(), str(loop.root), "b" * 40, [])
     assert result in build_loop._REPAIR_REFUSED and "changed nothing" in said
+
+
+# --- the decisions a task stands on reach it (CR-92) --------------------------------
+
+
+def _decide(loop: build_loop.Orchestrator, task_id: str, statement: str) -> None:
+    detail = {
+        "kind": models.LOCAL_DECISION,
+        "statement": statement,
+        "rationale": "r",
+        "undo": f"{task_id}: src/x.py",
+        "anchor": "src/x.py:1",
+    }
+    with store_mod.Store(loop.repo).transaction() as tx:
+        tx.append("decision_declared", cycle_id=loop.cycle_id, subject_ids=[task_id], detail=detail)
+
+
+def test_a_task_is_handed_what_every_task_it_stands_on_decided(tmp_path: Path) -> None:
+    """A decision is not asked, so nothing but the record carries it. T-003 stands on T-002, which
+    stands on T-001: the grandparent's choice is in the code T-003 builds on and nowhere else."""
+    plan = make_plan(
+        tasks=[
+            make_task("T-001", claim_ids=["C-001"]),
+            make_task("T-002", kind="parallel", blocked_by=["T-001"], claim_ids=["C-001"]),
+            make_task("T-003", kind="parallel", blocked_by=["T-002"], claim_ids=["C-001"]),
+            make_task("T-004", kind="parallel", blocked_by=["T-001"], claim_ids=["C-001"]),
+        ]
+    )
+    loop = orchestrator(tmp_path, plan=plan)
+    _decide(loop, "T-001", "one key per tenant")
+    _decide(loop, "T-002", "retry 3 times")
+    _decide(loop, "T-003", "its own")
+    _decide(loop, "T-004", "a sibling's, not an ancestor's")
+
+    upstream = loop._upstream_decisions(loop._load_graph().get("T-003"))
+
+    assert [(d["task"], d["statement"]) for d in upstream] == [
+        ("T-001", "one key per tenant"),
+        ("T-002", "retry 3 times"),
+    ]
+    assert upstream[0]["undo"] == "T-001: src/x.py"
+
+
+def test_a_task_with_nothing_beneath_it_is_handed_no_decisions(tmp_path: Path) -> None:
+    loop = orchestrator(tmp_path)
+    _decide(loop, "T-002", "downstream of T-001, not under it")
+    assert loop._upstream_decisions(loop._load_graph().get("T-001")) == []
+
+
+def test_an_overruled_decision_reaches_the_chain_only_once_its_repair_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused repair leaves the overruling in the review's human half, so the next round tries
+    again and the gate still shows it. A landed one writes it into the chain as the person's: the
+    next review stops listing it, and `rein decisions` reads it as theirs."""
+    from rein import observations
+    from rein import repair as repair_mod
+
+    loop = orchestrator(tmp_path)
+    _decide(loop, "T-002", "retry 3 times")
+    [decided] = events_mod.local_decisions(store_mod.Store(loop.repo).read_events(), loop.cycle_id)
+    item = repair_mod.Repair(
+        "T-002", (findings_mod.Attribution(decided["id"], "local_decision", "T-002", "src/x.py", detail="d"),)
+    )
+    recorded: list[tuple[str, str]] = []
+
+    def note(kind: str, **kw: object) -> bool:
+        recorded.append((kind, str(kw["arm"])))
+        return True
+
+    monkeypatch.setattr(observations, "record", note)
+
+    monkeypatch.setattr(loop, "_slice_branch", lambda task_id, where="": "")
+    monkeypatch.setattr(loop, "_repair_on_work_branch", lambda task, item, where="": False)
+    loop._repair(loop._load_graph().get("T-002"), item)
+    assert events_mod.local_decisions(store_mod.Store(loop.repo).read_events(), loop.cycle_id)[0]["overruled"] is False
+
+    monkeypatch.setattr(loop, "_repair_on_work_branch", lambda task, item, where="": True)
+    monkeypatch.setattr(loop, "_gate_after_repair", lambda task, where="": None)
+    monkeypatch.setattr(loop, "_restate_evidence", lambda task_id, gate: None)
+    loop._repair(loop._load_graph().get("T-002"), item)
+    assert events_mod.local_decisions(store_mod.Store(loop.repo).read_events(), loop.cycle_id)[0]["overruled"] is True
+    assert recorded == [("reach_overruled", observations.ARM_TOO_LOCAL)]

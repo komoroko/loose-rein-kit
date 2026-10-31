@@ -650,6 +650,8 @@ def stage_data(root: str | Path, stage: str) -> dict[str, object]:
         payload["summary"] = machine.get("summary", {})
         payload["decisions"] = [d for d in human.get("decisions", []) or [] if isinstance(d, dict)]
         payload["unanswered"] = human_review.unanswered_decisions(review, human)
+        payload["local_decisions"] = [dict(d) for d in review.local_decisions]
+        payload["overruled_decisions"] = sorted(human_review.overruled_decisions(human))
     elif stage == "diff":
         payload["diff"] = _diff_block(root)
     elif stage == "accept":

@@ -33,6 +33,7 @@ from tests._support import (
     make_reviews,
     make_state,
     make_task,
+    plan_tasks,
     seed_repo,
 )
 
@@ -1511,7 +1512,12 @@ def _edit_plan(repo: repo_mod.Repo, edit: Callable[[dict[str, Any]], None]) -> N
 
 
 def _task_entry(document: dict[str, Any], task_id: str) -> dict[str, Any]:
-    return next(t for t in document["tasks"] if t["id"] == task_id)
+    return next(t for t in plan_tasks(document) if t["id"] == task_id)
+
+
+def _issue_entry(document: dict[str, Any], task_id: str) -> dict[str, Any]:
+    """The issue holding `task_id` — where an edge between two tasks of different issues lives."""
+    return next(i for i in document["issues"] if any(t["id"] == task_id for t in i["sub_issues"]))
 
 
 def test_a_crossing_receipt_binds_its_task_and_not_the_whole_plan(tmp_path: Path) -> None:
@@ -1533,7 +1539,7 @@ def test_a_mandate_revision_that_left_a_crossing_alone_carries_it_back(tmp_path:
     assert _state_of(repo).gate_status("T-001") == "pending"
 
     def edit(document: dict[str, Any]) -> None:
-        _task_entry(document, "T-001")["blocked_by"] = ["T-003"]  # order: no approval is about it
+        _issue_entry(document, "T-001")["blocked_by"] = ["I-003"]  # order: no approval is about it
         _task_entry(document, "T-003").setdefault("scope", {}).setdefault("include", []).append("docs/x.md")
         _task_entry(document, "T-002")["title"] = "a different task now"  # what T-002 authorizes moved
 
@@ -1644,7 +1650,7 @@ def test_doctor_reads_a_crossing_receipt_against_its_task_not_the_plan(tmp_path:
         return [f.message for f in findings if f.level == "FAIL" and "binds a task" in f.message]
 
     assert crossing_fails() == []
-    _edit_plan(repo, lambda d: _task_entry(d, "T-001").__setitem__("blocked_by", ["T-003"]))
+    _edit_plan(repo, lambda d: _issue_entry(d, "T-001").__setitem__("blocked_by", ["I-003"]))
     assert crossing_fails() == []
     (repo.root / "docs" / "tasks").mkdir(parents=True, exist_ok=True)
     (repo.root / "docs" / "tasks" / "T-002.md").write_text("# T-002, rewritten\n", encoding="utf-8")
@@ -1728,7 +1734,7 @@ def _recut(tmp_path: Path, *, reversible: bool) -> None:
     """Re-cut the draft plan so T-001 is, or is no longer, an irreversible point."""
     path = tmp_path / ".rein" / "plan.yaml"
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    for task in document["tasks"]:
+    for task in plan_tasks(document):
         for surface in task.get("operator_surface", []):
             surface["reversible"] = reversible
     path.write_text(yaml.safe_dump(document, sort_keys=False, allow_unicode=True), encoding="utf-8")

@@ -1,4 +1,6 @@
-// The Board: the dependency DAG, the frontier order, task detail, and the traceability table.
+// The Board: the issue DAG, an opened issue's sub-issues, the frontier order, sub-issue detail, and
+// the traceability table. The graph is drawn at the issue level — the unit a launch never crosses —
+// and an issue opens onto the sub-issues a human approved, each of which opens onto its own detail.
 
 import { useState } from "react";
 
@@ -31,19 +33,20 @@ function ArrowDefs() {
 
 const COL_W = 170, ROW_H = 52, NODE_W = 132, NODE_H = 34, PAD_X = 12, PAD_Y = 12;
 
-function Dag({ tasks, byId, onPick }) {
-  const crit = new Set(tasks.critical_path);
+// `graph` is {layers, critical_path, rows}: the issues, with their edges and rolled-up status.
+function Dag({ graph, byId, onPick }) {
+  const crit = new Set(graph.critical_path);
   const pos = {};
-  tasks.layers.forEach((ids, c) => ids.forEach((id, r) => { pos[id] = { c, r }; }));
-  const cols = tasks.layers.length || 1;
-  const rows = Math.max(1, ...tasks.layers.map((l) => l.length));
+  graph.layers.forEach((ids, c) => ids.forEach((id, r) => { pos[id] = { c, r }; }));
+  const cols = graph.layers.length || 1;
+  const rows = Math.max(1, ...graph.layers.map((l) => l.length));
   const width = cols * COL_W + PAD_X * 2;
   const height = rows * ROW_H + PAD_Y * 2;
   const X = (id) => PAD_X + pos[id].c * COL_W;
   const Y = (id) => PAD_Y + pos[id].r * ROW_H;
 
   const edges = [];
-  tasks.rows.forEach((tk) =>
+  graph.rows.forEach((tk) =>
     (tk.blocked_by || []).forEach((dep) => {
       if (!pos[dep] || !pos[tk.id]) return;
       // The edge stops 3px short of the node so the arrowhead points *at* the border instead of
@@ -68,7 +71,7 @@ function Dag({ tasks, byId, onPick }) {
       <svg className="dag" viewBox={`0 0 ${width} ${height}`} width={width} height={height}>
         <ArrowDefs />
         {edges}
-        {tasks.layers.flat().map((id) => {
+        {graph.layers.flat().map((id) => {
           const tk = byId[id] || { status: "todo" };
           const isCrit = crit.has(id);
           return (
@@ -110,12 +113,12 @@ function Legend() {
 
 // Per-layer progress: one row per execution layer so a running build reads at a glance (derived
 // entirely from layers + statuses already in the status payload — no extra API).
-function Layers({ tasks, byId, onPick }) {
-  if (!tasks.layers.length) return null;
+function Layers({ graph, byId, onPick }) {
+  if (!graph.layers.length) return null;
   const st = (id) => (byId[id] || { status: "todo" }).status;
   return (
     <div className="layers">
-      {tasks.layers.map((ids, i) => {
+      {graph.layers.map((ids, i) => {
         const done = ids.filter((id) => st(id) === "done").length;
         const running = ids.filter((id) => st(id) === "in-progress").length;
         return (
@@ -148,6 +151,45 @@ const SALVAGE = {
   conflict: "previous work conflicts — left on its branch",
 };
 
+// One opened issue: what it is, and every sub-issue it holds with what each was approved to do. A
+// sub-issue opens onto its own detail below. What runs alone is said here, at the list, because it
+// is what decides how the loop may launch the rest: a crossing never shares a launch, and neither
+// does a sub-issue a failed bundle was split back into.
+function IssueDetail({ issue, byId, picked, onPick, onClose }) {
+  if (!issue) return null;
+  const subs = (issue.sub_issues || []).map((id) => byId[id]).filter(Boolean);
+  const done = subs.filter((t) => t.status === "done").length;
+  return (
+    <div className="detail" id="issueDetail">
+      <b className="mono">{issue.id}</b> — {issue.title}{" "}
+      <span className="clk empty" onClick={onClose}>(close)</span>
+      <dt>status / kind</dt>
+      <div>{issue.status} / {issue.kind} · {done}/{subs.length} sub-issues done</div>
+      <dt>blockedBy</dt>
+      <div className="mono">{issue.blocked_by && issue.blocked_by.length ? issue.blocked_by.join(", ") : "—"}</div>
+      <dt>sub-issues</dt>
+      <Table head={["ID", "Title", "Status", "Criteria", "Launch", "Landed in"]}>
+        {subs.map((t) => (
+          <tr className={"clk" + (t.id === picked ? " picked" : "")} key={t.id} onClick={() => onPick(t.id)}>
+            <td><Chip id={t.id} status={t.status} /></td>
+            <td>{t.title}</td>
+            <td>{t.status}</td>
+            <td>{(t.acceptance || []).length}</td>
+            <td>
+              {t.irreversible
+                ? <span className="bad">alone — irreversible</span>
+                : t.unbundled
+                  ? <span title={t.unbundled}>alone — split from a bundle</span>
+                  : "may share"}
+            </td>
+            <td className="mono">{t.commit ? String(t.commit).slice(0, 12) : "—"}</td>
+          </tr>
+        ))}
+      </Table>
+    </div>
+  );
+}
+
 // Field names are `_tasks_block`'s rows verbatim: a task answers for `claim_ids`. The older
 // `req`/`test` names never exist in the payload and would always print "—".
 function TaskDetail({ task }) {
@@ -162,6 +204,8 @@ function TaskDetail({ task }) {
   return (
     <div className="detail">
       <b className="mono">{task.id}</b> — {task.title}
+      <dt>issue</dt>
+      <div className="mono">{task.issue || "—"}</div>
       <dt>status / kind / risk</dt>
       <div>{task.status} / {task.kind} / {task.risk}</div>
       {/* The commit that landed the task, so "done" is something you can go and read. */}
@@ -181,6 +225,14 @@ function TaskDetail({ task }) {
       <div className="mono">{list(task.blocked_by)}</div>
       <dt>claims</dt>
       <div className="mono">{list(task.claim_ids)}</div>
+      <dt>criteria</dt>
+      {(task.acceptance || []).length ? (
+        (task.acceptance || []).map((a) => (
+          <div key={a.id}><span className="mono">{a.id}</span> {a.statement}</div>
+        ))
+      ) : (
+        <div>—</div>
+      )}
     </div>
   );
 }
@@ -197,9 +249,9 @@ function Trace({ trace, byId, onPick }) {
   ];
   return (
     <div className="block" id="traceSection">
-      <h2>Requirement → claim → task</h2>
+      <h2>Requirement → claim → sub-issue</h2>
       <div id="trace">
-        <Table head={["Requirement", "claims", "tasks"]}>
+        <Table head={["Requirement", "claims", "sub-issues"]}>
           {(trace.requirements || []).map((r) => (
             <tr key={r.id}>
               <td className="mono">
@@ -233,6 +285,10 @@ function Trace({ trace, byId, onPick }) {
 }
 
 export default function Board({ status }) {
+  // Two picks, not one: the issue that is open, and which of its sub-issues is. Picking a sub-issue
+  // anywhere else on the board (the frontier, the trace) opens its issue too, so the detail always
+  // sits under the list it belongs to.
+  const [openIssue, setOpenIssue] = useState(null);
   const [picked, setPicked] = useState(null);
   if (!status || status.error) {
     return (
@@ -247,11 +303,18 @@ export default function Board({ status }) {
   const tasks = status.tasks;
   const byId = {};
   if (tasks) tasks.rows.forEach((t) => { byId[t.id] = t; });
+  const issueById = {};
+  if (tasks) (tasks.issues || []).forEach((i) => { issueById[i.id] = i; });
+  const issues = tasks
+    ? { layers: tasks.issue_layers || [], critical_path: tasks.issue_critical_path || [], rows: tasks.issues || [] }
+    : null;
+  const pickIssue = (id) => { setOpenIssue(id); setPicked(null); };
+  const pickSub = (id) => { setOpenIssue((byId[id] || {}).issue || null); setPicked(id); };
 
   return (
     <div className="view" id="view-board">
       <div className="block">
-        <h2>Tasks</h2>
+        <h2>Issues</h2>
         <div id="tasks">
           {!tasks ? (
             <Empty>No tasks.yaml yet (created by /tasks).</Empty>
@@ -271,23 +334,31 @@ export default function Board({ status }) {
                 ))}
                 <span className="pill">total {tasks.total}</span>
               </div>
-              {tasks.rows.length ? (
+              {issues.rows.length ? (
                 <>
-                  <Layers tasks={tasks} byId={byId} onPick={setPicked} />
+                  <Layers graph={issues} byId={issueById} onPick={pickIssue} />
                   <Legend />
-                  <Dag tasks={tasks} byId={byId} onPick={setPicked} />
+                  <Dag graph={issues} byId={issueById} onPick={pickIssue} />
                 </>
               ) : (
-                <Empty>(no tasks)</Empty>
+                <Empty>(no issues)</Empty>
               )}
+              <IssueDetail
+                issue={issueById[openIssue]}
+                byId={byId}
+                picked={picked}
+                onPick={setPicked}
+                onClose={() => pickIssue(null)}
+              />
               <div className="subhead" style={{ marginTop: "1rem" }}>
                 Frontier — what can start now, best first
               </div>
               {tasks.frontier.length ? (
-                <Table head={["ID", "Title", "Kind", "fan-out"]}>
+                <Table head={["ID", "Issue", "Title", "Kind", "fan-out"]}>
                   {tasks.frontier.map((f) => (
-                    <tr className="clk" key={f.id} onClick={() => setPicked(f.id)}>
+                    <tr className="clk" key={f.id} onClick={() => pickSub(f.id)}>
                       <td className="mono">{f.id}</td>
+                      <td className="mono">{(byId[f.id] || {}).issue || "—"}</td>
                       <td>{f.title}</td>
                       <td>{f.kind}</td>
                       <td>{f.fan_out}</td>
@@ -304,7 +375,7 @@ export default function Board({ status }) {
           <TaskDetail task={byId[picked]} />
         </div>
       </div>
-      <Trace trace={status.trace} byId={byId} onPick={setPicked} />
+      <Trace trace={status.trace} byId={byId} onPick={pickSub} />
     </div>
   );
 }

@@ -296,6 +296,16 @@ export function OrientStage({ data, review, asBuilt, onAsBuilt }) {
       </tr>
     );
   }
+  // A bundle that did not land, split back into sub-issues that ran alone. Grouping is the loop's
+  // and needs nobody's approval; this is where that stops meaning nobody saw it.
+  for (const o of residuals.split_from_bundles || []) {
+    residualRows.push(
+      <tr key={"split:" + o.task_id}>
+        <td>split from a bundle</td>
+        <td className="mono">{o.task_id}: {o.why}</td>
+      </tr>
+    );
+  }
   // Which reviews read each task. `reviews.yaml` can change mid-cycle without rewinding anything,
   // so the screen that takes the change says what each task actually got.
   for (const r of residuals.reviews_by_task || []) {
@@ -747,6 +757,58 @@ function WhatRaisedThese({ data, onDisposition }) {
   );
 }
 
+// What implementers decided without asking. Nothing here asks for an answer — approving keeps each
+// one — so there is no "keep" button, only the one act that changes something: overruling it, which
+// hands the code it shaped to the next `rein build` as a repair.
+function LocalDecision({ decision, overruled, onOverrule }) {
+  const [note, setNote] = useState("");
+  return (
+    <div className="card" data-local-decision={decision.id}>
+      <div className="subhead">
+        {decision.id} <span className="mono">{decision.task}</span> <span className="mono">{decision.anchor}</span>
+      </div>
+      <p>{decision.statement}</p>
+      <p className="note">why: {decision.rationale}</p>
+      <p className="note">overruling it redoes: {decision.undo}</p>
+      {overruled ? (
+        <span className="okline">overruled — the next `rein build` repairs it</span>
+      ) : (
+        <>
+          <TextField label="what it should be instead" value={note} onChange={setNote} />
+          <div className="row">
+            <button
+              onClick={() =>
+                note.trim()
+                  ? onOverrule({ subject_id: decision.id, action: "revise_implementation", note })
+                  : toast("say what it should be instead", "err")
+              }
+            >
+              Overrule
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function LocalDecisions({ data, onDisposition }) {
+  const decisions = data.local_decisions || [];
+  if (!decisions.length) return null;
+  const overruled = new Set(data.overruled_decisions || []);
+  return (
+    <>
+      <Subhead spaced>Decided without asking ({decisions.length})</Subhead>
+      <p className="note">
+        Each changes no claim, scope or criterion, so the implementer made it and went on. Approving keeps it.
+      </p>
+      {decisions.map((d) => (
+        <LocalDecision decision={d} key={d.id} overruled={overruled.has(d.id)} onOverrule={onDisposition} />
+      ))}
+    </>
+  );
+}
+
 function ReviewFindings({ data }) {
   const findings = data.review_findings || [];
   const read = data.reviews_read || [];
@@ -817,6 +879,7 @@ export function DecisionStage({ data, onPost }) {
         <OkLine>✓ nothing in this review needs a decision.</OkLine>
       )}
       <WhatRaisedThese data={data} onDisposition={(body) => onPost("disposition", body)} />
+      <LocalDecisions data={data} onDisposition={(body) => onPost("disposition", body)} />
       <ReviewFindings data={data} />
     </>
   );
@@ -861,6 +924,8 @@ function ExpertiseCard({ gap, onPost }) {
 const RESIDUE_TITLES = {
   unsettled: "claims not found aligned",
   undecided: "decision cards not answered",
+  decided_alone: "decisions an implementer made without asking (approving keeps them)",
+  observed: "what a reader saw beyond a fix and no repair has closed",
   inferred: "claims aligned on an AI's reading alone",
   questions: "questions only a person can settle",
   not_read: "what nobody read",

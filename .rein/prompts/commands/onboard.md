@@ -53,7 +53,7 @@ the template's machinery: `/req` and `/design` start from the baseline this comm
      `session-compaction` (or starting `/req` in a fresh session); the survey conversation is no
      longer needed (pre-compact check: `.rein/prompts/rules/gate-workflow.md` "Context budget").
 
-Write the deliverables in the user's language.
+Write the deliverables in the language `project.language` in `.rein/config.yaml` names (`en` when it is absent).
 
 ## Entry points by starting state
 

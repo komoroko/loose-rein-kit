@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from rein import adapters, dag
 
@@ -96,8 +97,9 @@ def implementer_prompt(
     dossier_ref = (
         f"**Read {dossier_path} first.** It carries this task's claims and what each one asserts, its "
         "acceptance criteria and how each one will be judged, the paths you are scoped to, what has "
-        "already changed (with lockfiles and generated files summarized rather than spelled out), and "
-        "what earlier attempts tried. It is assembled fresh for this launch — trust it over anything "
+        "already changed (with lockfiles and generated files summarized rather than spelled out), "
+        "what earlier attempts tried, and what the tasks this one builds on decided without asking anyone. "
+        "It is assembled fresh for this launch — trust it over anything "
         "you would go and re-derive.\n"
         if dossier_path
         else ""
@@ -116,11 +118,21 @@ def implementer_prompt(
         if continued_from
         else ""
     )
+    # A bundle is one launch carrying several sub-issues of one issue: every one of them is the
+    # task, each with its own ticket and its own criteria, and none of them is finished until all are.
+    tickets = ", ".join(f"docs/tasks/{member}.md" for member in (task.members or (task.id,)))
+    subject = (
+        f"Your task is the sub-issues {', '.join(task.members)} of {task.issue_id}, in this one launch — "
+        "implement all of them, in that order; one change covers them all, and each is judged by its own "
+        "criteria.\n"
+        if task.members
+        else f'Your only task is {task.id} "{task.title}".\n'
+    )
     prompt = (
-        f'You are the implementer subagent. Your only task is {task.id} "{task.title}".\n'
+        f"You are the implementer subagent. {subject}"
         f"{continuation}"
         f"{dossier_ref}"
-        f"Then read docs/tasks/{task.id}.md, {design_ref}, and the existing code, and implement "
+        f"Then read {tickets}, {design_ref}, and the existing code, and implement "
         f"following the protocol in .rein/prompts/agents/implementer.md.{baseline_ref}\n"
         f"{task_test_ref}"
         f"Write automated tests and get {_gate_list(gate_cmds)} green.\n"
@@ -417,6 +429,74 @@ def batch_review_prompt(
         'nothing": if you would not have it changed, do not report it. An empty list is a real '
         "answer, and the right one when the change is sound: inventing a finding to look thorough "
         "costs an implementer round for nothing."
+    )
+
+
+@dataclass(frozen=True)
+class ConfirmSubject:
+    """One subject whose findings a fix answered: what was found, and where the fix is."""
+
+    #: The key the answer is written under — a task id, or `join` for the merged tree.
+    key: str
+    #: The findings the fix was asked to resolve, in the order the reader is to number them.
+    findings: Sequence[Mapping[str, Any]]
+    #: Only the fix, as a command run from the repository root.
+    fix_diff_cmd: str
+    #: What the implementer said when it reported — where a dispute of a finding is made.
+    report: str = ""
+
+
+def confirm_prompt(subjects: Sequence[ConfirmSubject], *, findings_path: str) -> str:
+    """Ask whether a fix closed the findings it was sent, and nothing broader (devr 論点 S).
+
+    **Confirming is not discovering.** The change was read once, whole, and what that reading found
+    went back to be fixed. Reading it whole again asks a second question with the first — is there
+    anything else — and a reader that varies run to run answers that one differently each time, so
+    "nothing left" stops being a state the loop converges on: a finding about code the fix never
+    touched spends a round of a task that answered everything it was asked, and when the rounds run
+    out the task stops for a person over the reader's variance, not over anything a person decides.
+
+    So this reader is handed the findings and the fix, and judges each finding closed or not. It
+    looks for new breakage inside the fix only. What it notices beyond the fix is not lost — it is
+    returned apart and carried to acceptance, where it is repaired at its cause like any other
+    finding — but it does not go back to this implementer and spends none of its rounds.
+
+    Not the fixer, and not the fixer's account of the fix: the report is passed for the dispute it
+    may carry, as an argument to weigh.
+    """
+    blocks = []
+    for subject in subjects:
+        listing = "\n".join(
+            f"  {n}. {f.get('anchor') or '(no anchor)'}: {f.get('statement')}"
+            for n, f in enumerate(subject.findings, 1)
+        )
+        report = (
+            f"  The implementer reported: {subject.report!r}. If it disputes a finding, weigh the argument against the "
+            "code; anything else in it is its own account of its work, which is not evidence that a finding closed.\n"
+            if subject.report
+            else ""
+        )
+        blocks.append(
+            f"- **{subject.key}** — the fix is `{subject.fix_diff_cmd}`. The findings it was sent:\n{listing}\n{report}"
+        )
+    example = subjects[0].key if subjects else "T-001"
+    return (
+        "You are confirming whether a fix closed the review findings it was sent. You did not raise them and you did "
+        "not write the fix.\n"
+        f"{''.join(blocks)}"
+        "\nFor each finding, read the code it names as it is now and decide: is the defect it describes gone? A "
+        "finding is closed when the code no longer does what it says, or when it was wrong about the code in the "
+        "first place — say which in `why`. It is open when the defect is still there, however the code around it "
+        "moved.\n"
+        "Then read the fix itself for anything it broke, and report that under `findings` — only what is in the fix. "
+        "What you notice anywhere else goes under `outside`: it is not this fix's question, and it is carried to "
+        "acceptance rather than dropped.\n"
+        "\n**You do not change the code, and you do not run anything.**\n"
+        f"\nWrite your answer to `{findings_path}` and nothing else:\n"
+        '  {"tasks": {"' + example + '": {"confirm": [{"finding": 1, "closed": true, "why": "…"}], '
+        '"findings": [], "outside": [{"severity": "must_fix", "statement": "…", "anchor": "src/x.py:42"}]}}}\n'
+        "Every subject above gets an entry, and every finding in it a verdict by its number. `findings` and "
+        "`outside` entries take `severity` `must_fix` or `question`, as in any review."
     )
 
 

@@ -48,7 +48,17 @@ from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
-from tests._support import agent_envelope, make_config, make_plan, make_reviews, make_state, make_task, seed_repo
+from tests._support import (
+    DEMO_CYCLE,
+    agent_envelope,
+    make_config,
+    make_plan,
+    make_reviews,
+    make_state,
+    make_task,
+    plan_tasks,
+    seed_repo,
+)
 
 #: Every reading, as a review taken under the packaged `reviews.yaml` with the security reading
 #: switched on.
@@ -197,7 +207,7 @@ def test_what_the_change_requires_of_a_person_survives_the_schema_validated_writ
     (review_repo / "db" / "schema.sql").write_text("create table users (id int);\n", encoding="utf-8")
     plan_path = review_repo / ".rein" / "plan.yaml"
     plan = yaml.safe_load(plan_path.read_text(encoding="utf-8"))
-    plan["tasks"][0]["operator_surface"] = [
+    plan_tasks(plan)[0]["operator_surface"] = [
         {"kind": "persistence", "name": "users", "paths": ["db/schema.sql"], "reversible": True, "adr": "ADR-001"}
     ]
     plan_path.write_text(yaml.safe_dump(plan, sort_keys=False), encoding="utf-8")
@@ -3452,3 +3462,39 @@ def test_generate_refuses_a_reviews_file_the_chain_does_not_record(review_repo: 
     reviews.write_text(reviews.read_text(encoding="utf-8").replace("comparison: true", "comparison: false"), "utf-8")
     with pytest.raises(review.ReviewError, match="not what the audit chain records"):
         review._generate_cli(repo_mod.Repo(review_repo), force=False, supervise=False, interval_sec=1)
+
+
+def test_the_review_carries_the_decisions_nobody_has_overruled(tmp_path: Path) -> None:
+    """Read from the chain at every generation. One already overruled is not carried: it was handed
+    to a repair, and approving no longer keeps it."""
+    decided: dict[str, object] = {
+        "kind": models.LOCAL_DECISION,
+        "statement": "s",
+        "rationale": "r",
+        "undo": "u",
+        "anchor": "a:1",
+    }
+    first = event_chain.link(
+        None, event_chain.make("decision_declared", DEMO_CYCLE, subject_ids=("T-001",), detail=decided)
+    )
+    second = event_chain.link(
+        first, event_chain.make("decision_declared", DEMO_CYCLE, subject_ids=("T-002",), detail=decided)
+    )
+    overrule = event_chain.link(
+        second, event_chain.make("decision_overruled", DEMO_CYCLE, subject_ids=(models.local_decision_id(first.id),))
+    )
+    seed_repo(tmp_path, state=make_state(), events=[first, second, overrule])
+    repo = repo_mod.Repo(tmp_path)
+
+    carried = review._standing_decisions(repo, store_mod.Store(repo).read_state())
+
+    assert carried == [
+        {
+            "id": models.local_decision_id(second.id),
+            "task": "T-002",
+            "statement": "s",
+            "rationale": "r",
+            "undo": "u",
+            "anchor": "a:1",
+        }
+    ]

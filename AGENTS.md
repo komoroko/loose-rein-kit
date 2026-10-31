@@ -39,9 +39,12 @@ unless that browser already holds a session.
 
 ## Language
 
-Conversation and deliverables (`docs/**`) are written in **the user's language**; template
-files stay in English. Machine-read vocabulary (`pending`/`approved`, task `status`/`kind`
-values, `epistemic_status`) stays as-is in every language.
+Conversation is in **the user's language**. Deliverables (`docs/**`) and the plan's prose are
+written in **the language `project.language` in `.rein/config.yaml` names** (`en` when it is
+absent), whoever is typing: it was chosen at `rein init`, and guessing it from the conversation made
+one repository's documents change language with the person at the keyboard. Template files stay in
+English. Machine-read vocabulary (`pending`/`approved`, task `status`/`kind` values,
+`epistemic_status`) stays as-is in every language.
 
 ## Development lifecycle
 

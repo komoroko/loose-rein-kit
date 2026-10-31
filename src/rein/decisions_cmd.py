@@ -1,14 +1,15 @@
 """`rein decisions` — every decision this repository has recorded, oldest cycle first.
 
-**The write sites stay where they are; this is the read side.** A judgement lands in one of four
+**The write sites stay where they are; this is the read side.** A judgement lands in one of five
 places, each for its own good reason: `plan.yaml`'s `decisions` holds what the drafting phase met
 and how far each one reached, an ADR holds the ones that needed options weighed, `## Clarifications`
-holds an ambiguity somebody closed, and `## Open questions` holds one that was passed through on a
-stated assumption. Collapsing them into one file would mean a fifth write path and four migrations,
-and the reason they are separate — different authors, different moments, different shapes — would
-not go away.
+holds an ambiguity somebody closed, `## Open questions` holds one that was passed through on a
+stated assumption, and the audit chain holds what an implementer decided during the build without
+asking (`rein decision add`) and which of those a person overruled at acceptance. Collapsing them
+into one file would mean another write path and as many migrations, and the reason they are
+separate — different authors, different moments, different shapes — would not go away.
 
-What was missing is that **all four are per-cycle**. `cycle-close` archives `plan.yaml`,
+What was missing is that **all of them are per-cycle**. `cycle-close` archives `plan.yaml`,
 `10-requirements.md` *and* `docs/decisions/`, then restores the last two from the pristine
 snapshot. So the working tree only ever shows the cycle now open: a decision settled last cycle is
 not merely harder to find, it is not in `docs/` at all. A person asking "what did I already decide
@@ -34,7 +35,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rein import common, event_chain, mdlite, strict_yaml
+from rein import common, event_chain, mdlite, models, strict_yaml
 from rein import events as events_mod
 from rein import repo as repo_mod
 
@@ -205,6 +206,27 @@ def _requirement_notes(docs_dir: Path) -> list[Decision]:
     return found
 
 
+def _build_decisions(events: Sequence[models.Event]) -> list[Decision]:
+    """What implementers decided without asking during the build, and which of those a person overruled.
+
+    Read from the chain, which is where they were recorded and the only place they outlive the
+    cycle. An overruled one is listed as the person's: overruling it was their decision, and the
+    code was repaired to it.
+    """
+    found: list[Decision] = []
+    for cycle_id in dict.fromkeys(event.cycle_id for event in events):
+        for decision in events_mod.local_decisions(events, cycle_id):
+            found.append(
+                Decision(
+                    where="overruled" if decision["overruled"] else "build",
+                    ident=decision["id"],
+                    summary=f"{decision['statement']} [{decision['task']}]",
+                    status="human" if decision["overruled"] else "loop",
+                )
+            )
+    return found
+
+
 def history(repo: repo_mod.Repo) -> tuple[list[CycleHistory], list[str]]:
     """Every cycle's decisions, oldest first, plus the archives that could not be verified."""
     live, defects = event_chain.scan(repo.events)
@@ -216,6 +238,7 @@ def history(repo: repo_mod.Repo) -> tuple[list[CycleHistory], list[str]]:
         decisions, why = _plan_decisions(source.rein_dir)
         decisions += _adrs(source.docs_dir)
         decisions += _requirement_notes(source.docs_dir)
+        decisions += _build_decisions(source.events)
         out.append(CycleHistory(source.label, decisions, [why] if why else []))
     return out, unverified
 
@@ -242,14 +265,17 @@ def render(cycles: Sequence[CycleHistory], unverified: Sequence[str] = ()) -> st
     if not total:
         lines.append(
             "No decision is on record yet. They accumulate as cycles close: `plan.yaml` keeps what "
-            "the drafting phase met, an ADR keeps what needed options weighed, and "
-            "`10-requirements.md` keeps what was clarified or passed through on an assumption."
+            "the drafting phase met, an ADR keeps what needed options weighed, "
+            "`10-requirements.md` keeps what was clarified or passed through on an assumption, and "
+            "the audit chain keeps what an implementer decided during the build."
         )
     else:
         lines.append(
-            f"{total} record(s) across {len(cycles)} cycle(s). Four write sites, read as one — "
+            f"{total} record(s) across {len(cycles)} cycle(s). Five write sites, read as one — "
             "`plan` is a decision the drafting phase met, `adr` one that needed options weighed, "
-            "`clarified` an ambiguity somebody closed, `open` an assumption the work went ahead on."
+            "`clarified` an ambiguity somebody closed, `open` an assumption the work went ahead on, "
+            "`build` one an implementer made without asking, and `overruled` one of those a person "
+            "overruled at acceptance."
         )
     return "\n".join(lines)
 

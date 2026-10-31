@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import hashlib
 import importlib
@@ -38,6 +39,7 @@ from collections.abc import Callable, Iterator
 from functools import cache
 from itertools import zip_longest
 from pathlib import Path
+from typing import Any
 
 from rein import build_loop, common, dag, gate_guard, gitignore, install, models, strict_yaml
 
@@ -388,6 +390,219 @@ def check_scaffold_docs_classified(root: Path) -> list[str]:
         for item in sorted(scaffold.iterdir())
         if item.name not in known
     ]
+
+
+#: What rein hands an agent, section by section: the documents and the module that builds prompts.
+EVAL_DOCUMENTS = ("src/rein/data/prompts", "src/rein/data/rules/AGENTS.md")
+EVAL_MODULE = "src/rein/build_prompts.py"
+EVAL_INVENTORY = "evals/inventory.yaml"
+_WHOLE = "(whole)"
+_REST = ("unverified", "none")
+
+
+def _flat(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _literal_text(node: ast.FunctionDef) -> str:
+    """The string literals of a prompt-building function, in source order: the prompt short of its values.
+
+    Walked depth first in field order rather than sorted by position: before Python 3.12 the pieces
+    of an f-string all carry the f-string's own position.
+    """
+    skip = node.body[0] if node.body and isinstance(node.body[0], ast.Expr) else None
+    parts: list[str] = []
+
+    def visit(at: ast.AST) -> None:
+        if at is skip:
+            return
+        if isinstance(at, ast.Constant) and isinstance(at.value, str):
+            parts.append(at.value)
+        for child in ast.iter_child_nodes(at):
+            visit(child)
+
+    visit(node)
+    return "".join(parts)
+
+
+def prompt_sections(root: Path) -> dict[str, dict[str, str]]:
+    """Every section rein hands an agent, with its text, whitespace folded.
+
+    A document's sections are its `## ` headings (the whole file when it has none); the module's are
+    its `*_prompt` functions, read as their string literals.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for entry in EVAL_DOCUMENTS:
+        base = root / entry
+        for path in sorted(base.rglob("*.md")) if base.is_dir() else [base]:
+            text = path.read_text(encoding="utf-8")
+            pieces = re.split(r"^## (.+?)\s*$", text, flags=re.MULTILINE)
+            rel = path.relative_to(root).as_posix()
+            if len(pieces) == 1:
+                out[rel] = {_WHOLE: _flat(text)}
+            else:
+                out[rel] = {pieces[i]: _flat(pieces[i + 1]) for i in range(1, len(pieces), 2)}
+    module = ast.parse((root / EVAL_MODULE).read_text(encoding="utf-8"))
+    out[EVAL_MODULE] = {
+        node.name: _flat(_literal_text(node))
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and re.fullmatch(r"[a-z_]+_prompt", node.name)
+    }
+    return out
+
+
+def _harness(root: Path) -> Any:
+    import sys
+
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from evals import harness
+
+    return harness
+
+
+def eval_guards(root: Path) -> dict[str, tuple[str, str, str]]:
+    """Each scenario's guard as `{name: (file, section, sentence)}`, read from its module."""
+    harness = _harness(root)
+    out: dict[str, tuple[str, str, str]] = {}
+    for name in harness.names():
+        guard = harness.load(name).guard
+        out[name] = (guard.file, guard.section, guard.sentence)
+    return out
+
+
+def eval_records(root: Path) -> tuple[dict[str, list[str]], list[str]]:
+    """Each scenario's record verdicts, and every record that does not match the launch it names.
+
+    A record is a count about one launch: this command, this prompt, this repository, this score. It
+    is rebuilt here from the sources as they stand, without launching anything, and a record whose
+    digests differ is refused — the sentence it measured is not the one that ships (devr 論点 T). The
+    CLI's version is not checked: it is not on a CI runner, and re-measuring on a new one is a
+    release step.
+    """
+    harness = _harness(root)
+    verdicts: dict[str, list[str]] = {}
+    failures: list[str] = []
+    known = set(harness.names())
+    for path in sorted(harness.RESULTS.glob("*.json")):
+        where = f"evals/results/{path.name}"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        name = document.get("scenario")
+        if name not in known:
+            failures.append(f"{where}: scenario {name!r} no longer exists — delete the record")
+            continue
+        scenario = harness.load(name)
+        if missing := [k for k in harness.KEY_FIELDS if k not in document]:
+            failures.append(f"{where}: its key has no {', '.join(missing)} — run it again or delete it")
+            continue
+        if document.get("scenario_digest") != harness.scenario_digest(name):
+            failures.append(
+                f"{where}: evals/scenarios/{name}.py or its fixtures changed since it was measured — "
+                "run it again or delete it"
+            )
+            continue
+        if document.get("launch_digests") != harness.current_digests(scenario, document.get("model", "")):
+            failures.append(
+                f"{where}: what {name} hands the agent changed since it was measured — run it again or delete it"
+            )
+            continue
+        if document.get("pending"):
+            failures.append(f"{where}: a run of {name} stopped part-way — run it again to finish it (devr 論点 X)")
+            continue
+        verdicts.setdefault(name, []).append(str(document.get("verdict")))
+    return verdicts, failures
+
+
+def _test_exists(root: Path, by: str) -> bool:
+    file, _, func = by.partition("::")
+    path = root / file
+    return (
+        bool(func)
+        and path.is_file()
+        and re.search(rf"^def {re.escape(func)}\(", path.read_text(encoding="utf-8"), re.MULTILINE) is not None
+    )
+
+
+def check_eval_inventory(
+    sections: dict[str, dict[str, str]],
+    inventory: object,
+    guards: dict[str, tuple[str, str, str]],
+    verdicts: dict[str, list[str]],
+    test_exists: Callable[[str], bool],
+) -> list[str]:
+    """Every section is classified, and every sentence said to be held names what holds it, which does.
+
+    The inventory is how "this prompt was tested" stops being a matter of memory (devr 論点 Q, 論点 U).
+    A section is `unverified` or `none` — whether anything in it still asks an agent for something
+    nothing checks — or a mapping that names the sentences that are held, each `by` a scenario whose
+    every record `holds`, or by a unit test (`tests/<file>::<function>`) showing the code refuse or
+    catch its violation, and says the same of the `rest`. A `code` with nothing named is the writer's
+    account, which is what this file exists to stop counting.
+    """
+    failures: list[str] = []
+    if not isinstance(inventory, dict):
+        return [f"{EVAL_INVENTORY}: must map each file to its sections"]
+    for path, heads in sections.items():
+        listed = inventory.get(path)
+        listed = listed if isinstance(listed, dict) else {}
+        failures += [f'{EVAL_INVENTORY}: {path} "{h}" is not classified' for h in heads if h not in listed]
+    for path, listed in inventory.items():
+        known = sections.get(str(path))
+        if known is None:
+            failures.append(f"{EVAL_INVENTORY}: {path} is not a file rein hands an agent")
+            continue
+        for head, entry in (listed or {}).items():
+            where = f'{EVAL_INVENTORY}: {path} "{head}"'
+            if head not in known:
+                failures.append(f"{where} names a section that does not exist")
+                continue
+            if isinstance(entry, str):
+                if entry not in _REST:
+                    failures.append(
+                        f"{where}: {entry!r} is not one of {', '.join(_REST)}, or a mapping of what holds it"
+                    )
+                continue
+            if not isinstance(entry, dict) or set(entry) != {"held", "rest"} or not isinstance(entry["held"], list):
+                failures.append(f"{where}: a mapping has `held` (a list) and `rest`, nothing else")
+                continue
+            if entry["rest"] not in _REST:
+                failures.append(f"{where}: `rest` is {entry['rest']!r}, not one of {', '.join(_REST)}")
+            for item in entry["held"]:
+                sentence = item.get("sentence") if isinstance(item, dict) else None
+                by = item.get("by") if isinstance(item, dict) else None
+                if not isinstance(sentence, str) or not isinstance(by, str) or set(item) != {"sentence", "by"}:
+                    failures.append(f"{where}: each held entry is a `sentence` and the `by` that holds it")
+                    continue
+                said = f"{where} {sentence[:40]!r}…"
+                found = known[head].count(_flat(sentence))
+                if found != 1:
+                    failures.append(f"{said}: the sentence occurs {found} time(s) in the section, not once")
+                if by.startswith("scenario:"):
+                    name = by.removeprefix("scenario:")
+                    guard = guards.get(name)
+                    if guard is None or guard[:2] != (str(path), head) or _flat(guard[2]) != _flat(sentence):
+                        failures.append(f"{said}: scenario {name!r} does not guard this sentence")
+                    elif not verdicts.get(name):
+                        failures.append(f"{said}: scenario {name!r} has no record that matches what ships")
+                    elif any(v != "holds" for v in verdicts[name]):
+                        failures.append(f"{said}: scenario {name!r} does not hold ({', '.join(verdicts[name])})")
+                elif not by.startswith("tests/") or not test_exists(by):
+                    failures.append(
+                        f"{said}: {by!r} is neither `scenario:<name>` nor a `tests/<file>::<function>` that exists"
+                    )
+    return failures
+
+
+def check_eval_guards(sections: dict[str, dict[str, str]], guards: dict[str, tuple[str, str, str]]) -> list[str]:
+    """A scenario names a section rein still hands an agent, and its sentence is in it once."""
+    failures: list[str] = []
+    for name, (file, section, sentence) in sorted(guards.items()):
+        text = sections.get(file, {}).get(section)
+        if text is None:
+            failures.append(f'evals/scenarios/{name}.py guards {file} "{section}", which does not exist')
+        elif text.count(_flat(sentence)) != 1:
+            failures.append(f'evals/scenarios/{name}.py guards a sentence {file} "{section}" does not hold once')
+    return failures
 
 
 def check_capability_mapping(mappings: dict[str, str], agents_text: str) -> list[str]:
@@ -1574,6 +1789,18 @@ def main(argv: list[str] | None = None) -> int:
         failures += check_upgrade_command(root)
         failures += check_distribution_name(root)
         failures += check_required_status_covers_every_job(root)
+        sections = prompt_sections(root)
+        guards = eval_guards(root)
+        verdicts, stale = eval_records(root)
+        failures += check_eval_guards(sections, guards)
+        failures += stale
+        failures += check_eval_inventory(
+            sections,
+            strict_yaml.load_mapping((root / EVAL_INVENTORY).read_text(encoding="utf-8"), what=EVAL_INVENTORY),
+            guards,
+            verdicts,
+            lambda by: _test_exists(root, by),
+        )
     except OSError as exc:
         logger.error(f"template-lint failed: {exc}")
         return 1

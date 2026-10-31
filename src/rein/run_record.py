@@ -111,6 +111,10 @@ class CycleCost:
     reused: dict[str, usage_mod.Usage] = field(default_factory=dict)
     #: Where these events were read from. Empty for the live chain, else the archive's path.
     source: str = ""
+    #: Bundles that did not land, and the sub-issues they sent back to run alone (`bundle_split`).
+    #: Every launch after a split is a cost the grouping caused, so the count is said beside the totals.
+    splits: int = 0
+    relaunched: int = 0
 
 
 def _fold(into: dict[str, usage_mod.Usage], rows: Any) -> None:
@@ -160,8 +164,14 @@ def costs(sources: Iterable[tuple[str, Sequence[models.Event]]]) -> list[CycleCo
     runs: dict[tuple[str, str], int] = {}
     billed: dict[tuple[str, str], dict[str, usage_mod.Usage]] = {}
     reused: dict[tuple[str, str], dict[str, usage_mod.Usage]] = {}
+    splits: dict[tuple[str, str], list[int]] = {}
     for source, events in sources:
         for event in events:
+            if event.event == "bundle_split":
+                counted = splits.setdefault((source, event.cycle_id), [0, 0])
+                counted[0] += 1
+                counted[1] += len(event.subject_ids)
+                continue
             if event.event != EVENT:
                 continue
             key = (source, event.cycle_id)
@@ -172,7 +182,15 @@ def costs(sources: Iterable[tuple[str, Sequence[models.Event]]]) -> list[CycleCo
             _fold(billed[key], event.detail.get("billed_by_role"))
             _fold(reused[key], event.detail.get("reused_by_role"))
     return [
-        CycleCost(cycle_id=cycle, runs=runs[key], billed=billed[key], reused=reused[key], source=source)
+        CycleCost(
+            cycle_id=cycle,
+            runs=runs[key],
+            billed=billed[key],
+            reused=reused[key],
+            source=source,
+            splits=splits.get(key, [0, 0])[0],
+            relaunched=splits.get(key, [0, 0])[1],
+        )
         for key in order
         for source, cycle in (key,)
     ]
@@ -203,6 +221,13 @@ def render_costs(rows: Sequence[CycleCost], *, unreadable: Sequence[str] = ()) -
             # A run that recorded its plan and then launched nothing. A bare header under it would
             # read as a cost of zero rather than as an absence of one.
             lines.append("  nothing measured — these runs recorded no launch")
+        if row.splits:
+            # Not priced on its own: a launch is billed by role, not by why it ran. What is said is
+            # how much of the work above ran twice because a bundle had to be split.
+            lines.append(
+                f"  bundles split: {row.splits}, sending {row.relaunched} sub-issue(s) back to run alone — "
+                "their second launches are inside the totals above"
+            )
         blocks.append("\n".join(lines))
     if not blocks:
         blocks.append(NOTHING_RECORDED)

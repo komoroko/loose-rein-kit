@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from rein import adapters, gate_guard, models, registry, store, ui
+from rein import adapters, gate_guard, human_review, models, registry, store, ui
 from tests._support import SANDBOXED_PROFILES, chain, make_config, make_reviews, make_state, seed_repo
 
 # The frontend's source. `ui_assets/app.js` is a built bundle — minified React plus this code — so a
@@ -405,10 +405,20 @@ def test_status_payload_carries_every_field_the_modules_read(tmp_path: Path) -> 
     tasks = payload["tasks"]
     assert isinstance(tasks, dict)
     # Board.jsx: Dag/Layers/pills; Now.jsx: InTheWay
-    for key in ("rows", "counts", "total", "layers", "critical_path", "frontier"):
+    for key in ("rows", "counts", "total", "layers", "critical_path", "frontier", "issues", "issue_layers"):
+        assert key in tasks, f"status.tasks.{key}"
+    for key in ("issue_critical_path",):
         assert key in tasks, f"status.tasks.{key}"
     for key in ("id", "title", "kind", "status", "risk", "blocked_by", "claim_ids", "handoff", "commit"):
         assert key in tasks["rows"][0], f"status.tasks.rows[].{key}"
+    # Board.jsx: IssueDetail opens an issue, and lists its sub-issues from the rows
+    for key in ("issue", "irreversible", "unbundled", "acceptance"):
+        assert key in tasks["rows"][0], f"status.tasks.rows[].{key}"
+    for key in ("id", "title", "kind", "status", "blocked_by", "sub_issues"):
+        assert key in tasks["issues"][0], f"status.tasks.issues[].{key}"
+    assert tasks["issues"][0]["sub_issues"] == [
+        r["id"] for r in tasks["rows"] if r["issue"] == tasks["issues"][0]["id"]
+    ]
     # the pills and the layer bar index counts by the status vocabulary itself
     assert set(tasks["counts"]) == set(models.TASK_STATUS_ORDER)
 
@@ -1570,3 +1580,67 @@ def test_a_card_answered_revise_implementation_is_the_loops_to_repair() -> None:
     )
     human = {"decisions": [{"card_id": cards[0]["id"], "choice": revise, "confidence": "high"}]}
     assert repair.answered_to_repair(review, human) == {"C-001"}
+
+
+# --- a decision an implementer made without asking can be overruled (CR-91) -----------------------
+
+
+_LD = {
+    "id": "LD-0000000a",
+    "task": "T-001",
+    "statement": "retry 3 times",
+    "rationale": "r",
+    "undo": "u",
+    "anchor": "a.py:1",
+}
+
+
+@pytest.fixture
+def decided_server(tmp_path: Path) -> Iterator[ui.DashboardServer]:
+    review = _generated_review_with_card()
+    machine = review["machine"]
+    assert isinstance(machine, dict)
+    machine["local_decisions"] = [_LD]
+    root = tmp_path / "ld"
+    root.mkdir()
+    state = make_state(project="ld", gates=dict.fromkeys(models.GATE_ENDS, "pending"))
+    seed_repo(root, state=state, config=make_config(profiles=SANDBOXED_PROFILES), review=review)
+    srv = ui.DashboardServer(("127.0.0.1", 0), root=root, read_only=False)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield srv
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_overruling_a_decision_records_it_for_the_next_build_to_repair(decided_server: ui.DashboardServer) -> None:
+    from rein import repo as repo_mod
+
+    body: dict[str, object] = {
+        "subject_id": "LD-0000000a",
+        "action": "revise_implementation",
+        "note": "fail fast instead",
+        "machine_digest": _digest(decided_server),
+    }
+    status, data = write(decided_server, "/api/review/disposition", body)
+    assert status == 200, data
+
+    review = store.Store(repo_mod.Repo(decided_server.active_root())).read_review()
+    assert review is not None
+    assert human_review.overruled_decisions(review.human) == {"LD-0000000a"}
+
+
+@pytest.mark.parametrize(
+    ("subject", "action", "says"),
+    [
+        ("LD-0000000a", "dispute_finding", "overruled with `revise_implementation`"),
+        ("LD-ffffffff", "revise_implementation", "not a standing decision"),
+    ],
+)
+def test_a_decision_takes_one_answer_and_only_one_it_has(
+    decided_server: ui.DashboardServer, subject: str, action: str, says: str
+) -> None:
+    body: dict[str, object] = {"subject_id": subject, "action": action, "machine_digest": _digest(decided_server)}
+    status, data = write(decided_server, "/api/review/disposition", body)
+    assert status == 400 and says in str(data)

@@ -210,6 +210,12 @@ def completion_blockers(review: models.Review | None, human: Mapping[str, Any] |
     if undecided:
         blockers.append(f"unanswered high/critical decision cards: {', '.join(undecided)}")
 
+    # Overruling a decision hands it to a repair, and the repair is `rein build`'s. Until it has run,
+    # the change being approved still carries the decision the person just said was wrong.
+    overruled = sorted(overruled_decisions(human))
+    if overruled:
+        blockers.append(f"overruled decisions not yet repaired — run `rein build`: {', '.join(overruled)}")
+
     gaps = expertise_gaps(review, human)
     if gaps:
         blockers.append(
@@ -221,17 +227,29 @@ def completion_blockers(review: models.Review | None, human: Mapping[str, Any] |
 
 
 #: The order the residue is shown in: what the decision rests on first, what was never looked at last.
-RESIDUE_KINDS: tuple[str, ...] = ("unsettled", "undecided", "inferred", "questions", "not_read")
+RESIDUE_KINDS: tuple[str, ...] = (
+    "unsettled",
+    "undecided",
+    "decided_alone",
+    "observed",
+    "inferred",
+    "questions",
+    "not_read",
+)
 
 
 def residue(review: models.Review, human: Mapping[str, Any] | None = None) -> dict[str, list[str]]:
     """What the machine could not settle — the only thing acceptance asks a person to take on.
 
     Everything the loop could establish it has, or it is still the loop's (`approve.Blocker`). What
-    is left is of five kinds, and none of them is a re-statement of a check that passed:
+    is left is of seven kinds, and none of them is a re-statement of a check that passed:
 
     * `unsettled` — a claim the comparison did not find aligned;
     * `undecided` — a Decision Card with no answer yet, whatever its risk;
+    * `decided_alone` — a decision an implementer made without asking (`rein decision add`) that
+      nobody has overruled: approving keeps it, and this is the one place it reaches a person;
+    * `observed` — what a reader confirming a fix saw beyond it during the build, that no repair at
+      acceptance has closed (`finding_observed`);
     * `inferred` — a claim found aligned on an AI's reading alone (`assessment_basis:
       machine_assessed`): nothing executed or attested stands behind it, and approving is accepting
       that;
@@ -257,6 +275,18 @@ def residue(review: models.Review, human: Mapping[str, Any] | None = None) -> di
     for card in _machine_list(review, "decision_cards"):
         if str(card.get("id")) not in answered:
             out["undecided"].append(f"{card.get('id')}: {str(card.get('question', ''))[:200]}")
+    overruling = overruled_decisions(human)
+    for decision in _machine_list(review, "local_decisions"):
+        if str(decision.get("id")) in overruling:
+            continue
+        out["decided_alone"].append(
+            f"{decision.get('id')} {decision.get('task', '')}: {str(decision.get('statement', ''))[:200]}"
+            f" (overruling it redoes: {str(decision.get('undo', ''))[:200]})"
+        )
+    for observation in _machine_list(review, "observations"):
+        out["observed"].append(
+            f"{observation.get('id')} ({observation.get('seen_in', '')}): {str(observation.get('statement', ''))[:200]}"
+        )
     for finding in _machine_list(review, "residual_findings"):
         if finding.get("severity") == "question":
             out["questions"].append(f"{finding.get('task_id', '')}: {str(finding.get('statement', ''))[:200]}")
@@ -282,6 +312,8 @@ def render_residue(residue_: Mapping[str, Sequence[str]]) -> str:
     titles = {
         "unsettled": "claims not found aligned",
         "undecided": "decision cards not answered",
+        "decided_alone": "decisions an implementer made without asking (approving keeps them)",
+        "observed": "what a reader saw beyond a fix and no repair has closed",
         "inferred": "claims aligned on an AI's reading alone",
         "questions": "questions only a person can settle",
         "not_read": "what nobody read",
@@ -371,6 +403,16 @@ def record_decision(
     out["decisions"].append(entry)
     out["status"] = "in_progress"
     return out
+
+
+def overruled_decisions(human: Mapping[str, Any]) -> frozenset[str]:
+    """The local decisions this review's human half overruled — answered "the code is what is wrong"."""
+    return frozenset(
+        str(d.get("subject_id"))
+        for d in _human_list(human, "dispositions")
+        if str(d.get("subject_id", "")).startswith(models.LOCAL_DECISION_ID_PREFIX)
+        and d.get("action") == "revise_implementation"
+    )
 
 
 def answered_card_ids(human: Mapping[str, Any]) -> frozenset[str]:

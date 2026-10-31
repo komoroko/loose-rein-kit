@@ -393,6 +393,21 @@ class GitWorkspace:
         self._run(["git", "worktree", "prune"], cwd=self.root)
         return ""
 
+    def set_aside(self, task_id: str) -> str:
+        """Move a split bundle's leaf branch out of the way. Returns where it went ("" = nothing to move).
+
+        The lead of a bundle runs alone next, on a branch of the same name, and a leftover branch of
+        that name is salvaged into the fresh worktree (`_salvage_leftovers`): the lead would start
+        with its siblings' half of the work. The branch is renamed rather than deleted — it holds
+        the only copy of what the bundle wrote, which a human may want to read.
+        """
+        branch = self.branch_for(task_id)
+        if self.dry_run or self._run(["git", "rev-parse", "--verify", "--quiet", branch], cwd=self.root)[0] != 0:
+            return ""
+        kept = self._salvage_name(branch).replace("-salvage-", "-bundle-", 1)
+        self.git(["branch", "-m", branch, kept])
+        return kept
+
     def cleanup_worktree(self, task_id: str) -> None:
         """Remove a leaf's worktree without merging (blocked / merge conflict).
 

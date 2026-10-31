@@ -288,3 +288,37 @@ test("a column a row does not answer for is named, not left as an unexplained ma
     "and the key explains it, like every other state on the screen",
   );
 });
+
+test("an issue opens onto its sub-issues, and a sub-issue onto its own detail", async () => {
+  const app = await dashboard("#board");
+  assert.equal(app.window.document.getElementById("issueDetail"), null, "nothing is open before a pick");
+
+  await app.click('.seg[title^="I-001"]');
+  const issue = app.html("issueDetail");
+  for (const id of ["T-001", "T-002", "T-004"]) assert.match(issue, new RegExp(`>${id}<`));
+  assert.doesNotMatch(issue, />T-003</, "another issue's sub-issue is not listed here");
+  assert.match(issue, /alone — irreversible/, "a crossing is told apart at the list");
+
+  await app.click({ text: "task T-002", tag: "td" });
+  const detail = app.html("taskDetail");
+  assert.match(detail, /T-002<\/b>/);
+  assert.match(detail, /I-001/);
+  assert.match(detail, /T-002 does what its ticket says/);
+
+  // A status that moves re-renders the board; what the person had open stays open.
+  await app.push("status", { ...STATUS, updated_at: "2026-07-23T10:05:00+09:00" });
+  assert.match(app.html("issueDetail"), /I-001/);
+  assert.match(app.html("taskDetail"), /T-002<\/b>/);
+
+  await app.click({ text: "(close)", tag: "span" });
+  assert.equal(app.window.document.getElementById("issueDetail"), null);
+  assert.equal(app.errors.length, 0, app.errors.join("\n"));
+});
+
+test("a sub-issue picked from the trace opens the issue it belongs to", async () => {
+  const app = await dashboard("#board");
+  await app.click({ text: "T-005", tag: "span.chip" });
+  assert.match(app.html("issueDetail"), /I-003/);
+  assert.match(app.html("issueDetail"), /split from a bundle/);
+  assert.match(app.html("taskDetail"), /T-005<\/b>/);
+});

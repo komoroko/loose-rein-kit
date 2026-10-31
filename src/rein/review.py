@@ -56,6 +56,7 @@ from rein import (
     run_progress,
     run_record,
 )
+from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
@@ -140,6 +141,8 @@ def assemble(
     brief_sections: Mapping[str, Any] | None = None,
     residual_findings: Sequence[Mapping[str, Any]] = (),
     scope_expansions: Sequence[Mapping[str, Any]] = (),
+    local_decisions: Sequence[Mapping[str, Any]] = (),
+    observations: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Compose a schema-valid `machine` half from the validated pieces (plan §6.6).
 
@@ -185,6 +188,10 @@ def assemble(
         machine["brief"] = dict(brief_sections)
     if residual_findings:
         machine["residual_findings"] = [dict(f) for f in residual_findings]
+    if local_decisions:
+        machine["local_decisions"] = [dict(d) for d in local_decisions]
+    if observations:
+        machine["observations"] = [dict(o) for o in observations]
     if gaps:
         machine["gaps"] = [dict(g) for g in gaps]
     if extra_behaviors:
@@ -210,6 +217,17 @@ def assemble(
     if cards:
         machine["decision_cards"] = cards
     return machine
+
+
+def _standing_decisions(repo: repo_mod.Repo, state: models.State | None) -> list[dict[str, Any]]:
+    """The local decisions of this cycle nobody has overruled, as the review carries them."""
+    if state is None or not state.cycle_id:
+        return []
+    return [
+        {k: v for k, v in decision.items() if k != "overruled"}
+        for decision in events_mod.local_decisions(event_chain.scan(repo.events)[0], state.cycle_id)
+        if not decision["overruled"]
+    ]
 
 
 # -- generation ---------------------------------------------------------------
@@ -780,6 +798,17 @@ def generate(
                 reviews_applied=brief.reviews_by_task(event_chain.scan(repo.events)[0]),
             ),
             residual_findings=brief.residual_findings(state),
+            # Read from the chain at every generation, so one recorded after the last review is
+            # listed by the next. One already overruled is not listed: it was handed to a repair,
+            # and approving no longer keeps it.
+            local_decisions=_standing_decisions(repo, state),
+            # What a reader confirming a fix saw beyond it, carried until a repair closes it: it
+            # went back to nobody during the build, and this is where it is answered.
+            observations=(
+                events_mod.open_observations(event_chain.scan(repo.events)[0], state.cycle_id)
+                if state is not None and state.cycle_id
+                else []
+            ),
             # What a repair widened and nobody has answered yet, and only while the change still
             # carries it: a path taken back out has nothing left to decide.
             scope_expansions=[
