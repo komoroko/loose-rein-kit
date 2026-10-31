@@ -52,6 +52,7 @@ def _files(**overrides: str) -> dict[str, str]:
     files = {
         template_lint.AGENTS_MD: _AGENTS,
         template_lint.TASKS_CMD: _TASKS_CMD,
+        template_lint.TASKS_REF: "",
         template_lint.BUILD_CMD: _DOD_PROSE,
         "README.md": _DOD_PROSE,
         "README.ja.md": _DOD_PROSE,
@@ -764,6 +765,7 @@ def test_live_repo_has_no_drift() -> None:
         for path in (
             template_lint.AGENTS_MD,
             template_lint.TASKS_CMD,
+            template_lint.TASKS_REF,
             template_lint.BUILD_CMD,
             template_lint.CONFIG_PATH,
             template_lint.REVIEWS_PATH,
@@ -998,3 +1000,17 @@ def test_check_quoted_gate_names_accepts_a_crossing_gate_and_its_spelling() -> N
 def test_check_quoted_gate_names_reports_a_name_once_per_file() -> None:
     text = "gate 'design' is ready.\nApprove gate 'design'?\n"
     assert len(template_lint.check_quoted_gate_names({"README.md": text})) == 1
+
+
+def test_a_procedure_too_long_to_survive_a_compaction_is_refused() -> None:
+    """After a compaction Claude Code re-attaches an invoked command's first 5,000 tokens and drops the
+    rest. `/build` was over twice that, and what it lost was the second half: how to wait for the
+    run, and what each exit code asks."""
+    short = {f"{template_lint.COMMANDS_DIR}/req.md": "x" * template_lint.COMMAND_BYTES}
+    long = {f"{template_lint.COMMANDS_DIR}/build.md": "x" * (template_lint.COMMAND_BYTES + 1)}
+    rules = {".rein/prompts/rules/gate-workflow.md": "x" * (template_lint.COMMAND_BYTES * 2)}
+    assert template_lint.check_command_size({**short, **rules}) == []
+    assert template_lint.check_command_size(long) == [
+        f"{template_lint.COMMANDS_DIR}/build.md: {template_lint.COMMAND_BYTES + 1} bytes, over the "
+        f"{template_lint.COMMAND_BYTES} a compaction keeps — move what one step needs into prompts/reference/"
+    ]

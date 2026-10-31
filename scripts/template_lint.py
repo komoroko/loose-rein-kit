@@ -51,6 +51,8 @@ logger = logging.getLogger("rein.template_lint")
 
 AGENTS_MD = "AGENTS.md"
 TASKS_CMD = ".rein/prompts/commands/tasks.md"
+#: What `/tasks` reads at the step that needs it: part of the procedure, kept out of its body.
+TASKS_REF = ".rein/prompts/reference/tasks-detail.md"
 BUILD_CMD = ".rein/prompts/commands/build.md"
 RULES_DIR = ".rein/prompts/rules"
 COMMANDS_DIR = ".rein/prompts/commands"
@@ -191,7 +193,8 @@ def check_vocabulary(files: dict[str, str]) -> list[str]:
     kinds = sorted(dag.KIND_VALUES)
     failures += _require(files[AGENTS_MD], AGENTS_MD, kinds, "task kind (dag.KIND_VALUES)")
     failures += _require(files[TASKS_CMD], TASKS_CMD, kinds, "task kind (dag.KIND_VALUES)")
-    failures += _require(files[TASKS_CMD], TASKS_CMD, sorted(dag.STATUS_VALUES), "task status (dag.STATUS_VALUES)")
+    procedure = files[TASKS_CMD] + files[TASKS_REF]
+    failures += _require(procedure, TASKS_CMD, sorted(dag.STATUS_VALUES), "task status (dag.STATUS_VALUES)")
     failures += _require(files[AGENTS_MD], AGENTS_MD, gate_names(), "gate (models.gate_names)")
     # The DoD step names are defined once (config.yaml) but narrated in several prose homes —
     # every copy must keep echoing them, or a renamed step teaches stale vocabulary somewhere.
@@ -1081,6 +1084,26 @@ def check_schema_key_spelling(root: Path, texts: dict[str, str]) -> list[str]:
     return failures
 
 
+#: What a command procedure may weigh. After a compaction Claude Code re-attaches an invoked command's
+#: first 5,000 tokens and drops the rest, and these prompts measured about 2.9 bytes a token: 14,500
+#: bytes is the line, less the command's own wrapper and a margin for the tokenizer.
+COMMAND_BYTES = 14_000
+
+
+def check_command_size(texts: dict[str, str]) -> list[str]:
+    """Every command procedure fits in what a compaction keeps of it.
+
+    What does not fit is lost from the second half, which is where a procedure says how it ends.
+    Detail one step needs goes to `prompts/reference/`, read at that step.
+    """
+    return [
+        f"{path}: {size} bytes, over the {COMMAND_BYTES} a compaction keeps — move what one step needs into "
+        "prompts/reference/"
+        for path, text in sorted(texts.items())
+        if path.startswith(COMMANDS_DIR + "/") and (size := len(text.encode("utf-8"))) > COMMAND_BYTES
+    ]
+
+
 def check_gate_presenters(texts: dict[str, str]) -> list[str]:
     """Each end gate is presented by exactly one procedure.
 
@@ -1743,7 +1766,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         files = {
             path: (root / path).read_text(encoding="utf-8")
-            for path in (AGENTS_MD, TASKS_CMD, BUILD_CMD, CONFIG_PATH, REVIEWS_PATH, "README.md", "README.ja.md")
+            for path in (
+                AGENTS_MD,
+                TASKS_CMD,
+                TASKS_REF,
+                BUILD_CMD,
+                CONFIG_PATH,
+                REVIEWS_PATH,
+                "README.md",
+                "README.ja.md",
+            )
         }
         failures = check_vocabulary(files)
         failures += check_wrapper_parity(root)
@@ -1764,6 +1796,7 @@ def main(argv: list[str] | None = None) -> int:
         failures += check_section_references(root, documents)
         failures += check_schema_key_spelling(root, documents)
         failures += check_gate_presenters(texts)
+        failures += check_command_size(texts)
         failures += check_quoted_gate_names(documents)
         failures += check_data_parity(root)
         failures += check_guard_defaults(files[CONFIG_PATH])
