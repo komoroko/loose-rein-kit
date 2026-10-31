@@ -1005,12 +1005,19 @@ def test_check_quoted_gate_names_reports_a_name_once_per_file() -> None:
 def test_a_procedure_too_long_to_survive_a_compaction_is_refused() -> None:
     """After a compaction Claude Code re-attaches an invoked command's first 5,000 tokens and drops the
     rest. `/build` was over twice that, and what it lost was the second half: how to wait for the
-    run, and what each exit code asks."""
-    short = {f"{template_lint.COMMANDS_DIR}/req.md": "x" * template_lint.COMMAND_BYTES}
-    long = {f"{template_lint.COMMANDS_DIR}/build.md": "x" * (template_lint.COMMAND_BYTES + 1)}
-    rules = {".rein/prompts/rules/gate-workflow.md": "x" * (template_lint.COMMAND_BYTES * 2)}
-    assert template_lint.check_command_size({**short, **rules}) == []
-    assert template_lint.check_command_size(long) == [
-        f"{template_lint.COMMANDS_DIR}/build.md: {template_lint.COMMAND_BYTES + 1} bytes, over the "
-        f"{template_lint.COMMAND_BYTES} a compaction keeps — move what one step needs into prompts/reference/"
+    run, and what each exit code asks. What is re-attached is the command — its wrapper with the
+    procedure read in — and at Opus's 2.83 bytes a token 14,000 bytes of procedure alone was past it."""
+    wrapper = "---\ndescription: x\n---\n\nExecute the procedure below.\n\n@.rein/prompts/commands/build.md\n"
+    fits = template_lint.COMMAND_BUDGET - len(wrapper.encode()) + len("@.rein/prompts/commands/build.md")
+    texts = {
+        f"{template_lint.COMMANDS_DIR}/build.md": "x" * fits,
+        f"{template_lint.CLAUDE_COMMANDS}/build.md": wrapper,
+        ".rein/prompts/rules/gate-workflow.md": "x" * 40_000,
+    }
+    assert template_lint.check_command_size(texts) == []
+    texts[f"{template_lint.COMMANDS_DIR}/build.md"] = "x" * (fits + 1)
+    assert template_lint.check_command_size(texts) == [
+        f"/build: {template_lint.COMMAND_BUDGET + 1} bytes with its wrapper, over the "
+        f"{template_lint.COMMAND_BUDGET} a compaction keeps — move what one step needs into prompts/reference/"
     ]
+    assert template_lint.COMMAND_BUDGET <= 5_000 * 2.83 * 0.95, "the budget leaves no margin for the tokenizer"

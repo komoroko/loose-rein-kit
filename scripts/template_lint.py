@@ -1084,24 +1084,34 @@ def check_schema_key_spelling(root: Path, texts: dict[str, str]) -> list[str]:
     return failures
 
 
-#: What a command procedure may weigh. After a compaction Claude Code re-attaches an invoked command's
-#: first 5,000 tokens and drops the rest, and these prompts measured about 2.9 bytes a token: 14,500
-#: bytes is the line, less the command's own wrapper and a margin for the tokenizer.
-COMMAND_BYTES = 14_000
+#: Where the Claude Code commands live, each a wrapper that reads its procedure in with `@`.
+CLAUDE_COMMANDS = "src/rein/data/integrations/claude/commands"
+#: What a command may weigh, wrapper and procedure together. After a compaction Claude Code re-attaches
+#: an invoked command's first 5,000 tokens and drops the rest; Opus 5.5 and Sonnet 5.5 measured 2.83
+#: bytes a token on these prompts. 5% of the line is left for a tokenizer that packs them tighter.
+COMMAND_BUDGET = int(5_000 * 2.83 * 0.95)
 
 
 def check_command_size(texts: dict[str, str]) -> list[str]:
-    """Every command procedure fits in what a compaction keeps of it.
+    """Every command, with its procedure read in, fits in what a compaction keeps of it.
 
     What does not fit is lost from the second half, which is where a procedure says how it ends.
     Detail one step needs goes to `prompts/reference/`, read at that step.
     """
-    return [
-        f"{path}: {size} bytes, over the {COMMAND_BYTES} a compaction keeps — move what one step needs into "
-        "prompts/reference/"
-        for path, text in sorted(texts.items())
-        if path.startswith(COMMANDS_DIR + "/") and (size := len(text.encode("utf-8"))) > COMMAND_BYTES
-    ]
+    failures: list[str] = []
+    for path, text in sorted(texts.items()):
+        if not path.startswith(COMMANDS_DIR + "/"):
+            continue
+        name = path.removeprefix(COMMANDS_DIR + "/")
+        wrapper = texts.get(f"{CLAUDE_COMMANDS}/{name}", "")
+        include = f"@{COMMANDS_DIR}/{name}"
+        size = len(text.encode("utf-8")) + len(wrapper.encode("utf-8")) - (len(include) if include in wrapper else 0)
+        if size > COMMAND_BUDGET:
+            failures.append(
+                f"/{name.removesuffix('.md')}: {size} bytes with its wrapper, over the {COMMAND_BUDGET} a "
+                "compaction keeps — move what one step needs into prompts/reference/"
+            )
+    return failures
 
 
 def check_gate_presenters(texts: dict[str, str]) -> list[str]:
