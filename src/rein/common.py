@@ -225,7 +225,7 @@ class Cancellation:
             self._cancelled = True
             held = list(self._procs)
         for proc in held:
-            _kill_group(proc)
+            kill_group(proc)
 
     def _attach(self, proc: Any) -> bool:
         """Take the launch; False when this token was already tripped, so the caller kills it.
@@ -308,7 +308,7 @@ def run(
 
     with proc:
         if token is not None and not token._attach(proc):
-            _kill_group(proc)  # cancelled in the window between Popen and the attach
+            kill_group(proc)  # cancelled in the window between Popen and the attach
         try:
             output, _ = proc.communicate(input=input_text, timeout=timeout)
             if token is not None and token.cancelled:
@@ -319,7 +319,7 @@ def run(
             # subprocess's own timeout handling kills the direct child only, so anything it
             # spawned survives — a stuck server keeps the port and the next run fails for a
             # reason that has nothing to do with the code. Kill the whole group instead.
-            _kill_group(proc)
+            kill_group(proc)
             output, _ = proc.communicate()
             elapsed = int(timeout) if timeout is not None else 0
             return RC_TIMEOUT, _cap(f"{output or ''}\ntimed out after {elapsed}s (process group killed)")
@@ -331,14 +331,14 @@ def run(
             # So Ctrl-C used to return promptly and leave the agent running, orphaned, still
             # spending. Kill the group, then let the exception carry on: stopping is the caller's
             # decision and this only makes it true of the process as well as of us.
-            _kill_group(proc)
+            kill_group(proc)
             raise
         finally:
             if token is not None:
                 token._detach(proc)
 
 
-def _kill_group(proc: Any) -> None:
+def kill_group(proc: Any) -> None:
     """SIGKILL the whole process group, falling back to the single process where that fails."""
     import os
     import signal
