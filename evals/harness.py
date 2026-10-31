@@ -367,7 +367,7 @@ def launch_contained(profile: models.ExecutorProfile) -> Callable[[Path, list[st
 
 
 def _read(rc: int, output: str, *, timed_out: bool = False) -> Launched:
-    """The stream's closing `result` event is the envelope `--output-format json` would have printed.
+    """Each turn's closing `result` event is the envelope `--output-format json` would have printed.
 
     A stream stopped at the timeout has no `result` event, and the models are read off the
     assistant messages it did print. Its lines are read one by one and the ones that are not JSON
@@ -390,10 +390,12 @@ def _read(rc: int, output: str, *, timed_out: bool = False) -> Launched:
         return Launched(rc, output, ())
     events = [json.loads(line) for line in output.splitlines() if line.strip()]
     results = [e for e in events if isinstance(e, dict) and e.get("type") == "result"]
-    if len(results) != 1:
-        raise HarnessError(f"the launch's stream closed with {len(results)} result event(s), not one")
-    _, spent = usage.parse_claude_envelope(json.dumps(results[0]))
-    return Launched(rc, output, spent.models)
+    if not results:
+        raise HarnessError("the launch's stream closed with 0 result event(s)")
+    # One per turn: a host that re-enters the agent when a background command exits — what `/build`
+    # tells a lead to rely on — goes on to another turn within the same launch.
+    answered = [model for result in results for model in usage.parse_claude_envelope(json.dumps(result))[1].models]
+    return Launched(rc, output, tuple(dict.fromkeys(answered)))
 
 
 @dataclass(frozen=True)

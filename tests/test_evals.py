@@ -441,6 +441,20 @@ def test_the_stream_is_read_for_the_model_that_answered_and_one_without_a_close_
         harness._read(0, "".join(json.dumps(e) + "\n" for e in events[:2]))
 
 
+def test_a_launch_the_host_re_entered_is_read_whole() -> None:
+    """A lead started `rein build` in the background, as `/build` tells it to, and the host re-entered
+    it when the build exited: one launch, two turns, two `result` events. It was refused as a broken
+    stream, and the run stopped on the sentence's own advice."""
+    events = [
+        {"type": "system", "subtype": "init"},
+        {"type": "result", "subtype": "success", "is_error": False, "result": "started", "modelUsage": {"m": {}}},
+        {"type": "system", "subtype": "init"},
+        {"type": "result", "subtype": "success", "is_error": False, "result": "it exited 2", "modelUsage": {"n": {}}},
+    ]
+    stream = "".join(json.dumps(e) + "\n" for e in events)
+    assert harness._read(0, stream) == harness.Launched(0, stream, ("m", "n"))
+
+
 def test_a_runs_transcripts_are_kept_beside_its_key_and_go_when_its_record_does(stores: Path) -> None:
     scenario = harness.load("review_empty")
     folder = stores / "transcripts" / "review_empty.m"

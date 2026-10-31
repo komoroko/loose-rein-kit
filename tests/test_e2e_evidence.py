@@ -179,6 +179,7 @@ def test_an_implementers_whole_output_is_kept_for_the_cycle_and_named_in_its_not
     build(repo)
 
     handoff = status_of(repo, "T-001")["handoff"]
+    assert isinstance(handoff, dict)
     kept = repo.root / handoff["last_agent"]["transcript"]
     state = store_mod.Store(repo).read_state()
     assert state is not None
