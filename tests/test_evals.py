@@ -563,6 +563,30 @@ def test_a_launch_stopped_at_the_timeout_takes_what_it_started_with_it(tmp_path:
     assert not _alive(pid), "a process the CLI started outlived the launch"
 
 
+def test_a_launch_stopped_at_the_timeout_takes_a_command_it_detached_with_it(tmp_path: Path) -> None:
+    """The process-group kill missed what the CLI had moved to a session of its own: Claude Code runs a
+    `run_in_background` command that way, and a `sleep` started so outlived a launch stopped at 45 seconds.
+    One that holds the output pipe also kept the timeout from returning until it ended by itself."""
+    started = tmp_path / "started.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+        f"open({str(started)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+    began = time.monotonic()
+    stopped = harness.launch_host(tmp_path, [sys.executable, "-c", script], 2.0)
+    assert stopped.timed_out
+    assert time.monotonic() - began < 20, "the timeout waited for the detached command to end on its own"
+    pid = int(started.read_text())
+    deadline = time.monotonic() + 5
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if _alive(pid):
+        os.kill(pid, 9)
+        raise AssertionError("a command the CLI detached outlived the launch")
+
+
 def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)

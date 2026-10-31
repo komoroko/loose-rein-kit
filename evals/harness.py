@@ -327,7 +327,8 @@ class Launched:
 def launch_host(root: Path, argv: list[str], timeout: float) -> Launched:
     env = {**os.environ, "PATH": f"{root / '.evalbin'}{os.pathsep}{os.environ.get('PATH', '')}"}
     # In its own session, so the timeout reaches what the CLI started — a test run left behind
-    # would go on changing the repository the trial is scored on.
+    # would go on changing the repository the trial is scored on. `kill_group` also reaches what the
+    # CLI moved to a session of its own: Claude Code runs a background command that way.
     with subprocess.Popen(
         argv,
         cwd=root,

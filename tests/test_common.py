@@ -82,6 +82,34 @@ def test_a_cancelled_run_returns_at_once_instead_of_at_its_own_pace() -> None:
     assert "cancelled by the caller" in out
 
 
+@pytest.mark.skipif(not os.path.isdir("/proc"), reason="descendants are read from /proc")
+@pytest.mark.integration
+def test_a_timeout_kills_a_descendant_that_left_the_process_group(tmp_path: Path) -> None:
+    """An agent CLI runs a background command in a session of its own, out of the group's reach, and
+    it went on running after the launch that started it was killed."""
+    marker = tmp_path / "child.pid"
+    script = textwrap.dedent(f"""
+        import subprocess, sys, time
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        open({str(marker)!r}, "w").write(str(child.pid))
+        time.sleep(60)
+    """)
+    began = time.monotonic()
+    rc, _ = common.run([sys.executable, "-c", script], timeout=1.5)
+    assert rc == common.RC_TIMEOUT
+    assert time.monotonic() - began < 20, "the timeout waited for the detached child to end on its own"
+
+    child_pid = int(marker.read_text())
+    for _ in range(50):
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    os.kill(child_pid, signal.SIGKILL)
+    raise AssertionError(f"child {child_pid} outlived the timed-out parent in a session of its own")
+
+
 def test_a_token_tripped_before_the_launch_kills_it_anyway() -> None:
     """The window between Popen returning and the token taking the process is why `cancel` cannot
     simply be "kill it": for a moment there is nothing to kill, and losing that race would leave a
