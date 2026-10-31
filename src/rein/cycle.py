@@ -31,7 +31,7 @@ import re
 import shutil
 from datetime import date
 
-from rein import common, data, event_chain, models, reviews_cmd
+from rein import build_loop, common, data, event_chain, models, reviews_cmd
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -171,6 +171,20 @@ def _archive(repo: repo_mod.Repo, rows: list[tuple[str, str, str]]) -> list[str]
             shutil.move(str(repo.path(src)), str(repo.path(dst)))
         moved.append(src)
     return moved
+
+
+def _prune_launches(repo: repo_mod.Repo, *, keep: str) -> None:
+    """Remove the launch transcripts of every cycle before the one being closed.
+
+    The closed cycle's stay, for the retrospective that follows it; the next close removes them.
+    They are working material, never the record: what was decided is in the audit chain.
+    """
+    root = repo.path(build_loop.LAUNCHES)
+    if not root.is_dir():
+        return
+    for cycle_dir in root.iterdir():
+        if cycle_dir.name != keep:
+            shutil.rmtree(cycle_dir)
 
 
 def _restore(repo: repo_mod.Repo, cycle_id: str, branch: str) -> list[str]:
@@ -357,6 +371,9 @@ def main(argv: list[str] | None = None) -> int:
                 "reviews": {"document": dict(carried.document), "digest": carried.digest},
             },
         )
+
+    # Last: the cycle is closed and the next one open whatever happens here.
+    _prune_launches(repo, keep=previous.cycle_id)
 
     print(f"\narchived {len(moved)} item(s), restored {len(restored)} scaffold(s)")
     print(f"cycle '{slug}' is open at phase 'brief'. Commit the archive, then write the next brief.")

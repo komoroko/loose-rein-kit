@@ -263,6 +263,26 @@ def test_close_archives_resets_and_records(tmp_path: Path) -> None:
     assert (tmp_path / "docs" / "10-requirements.md").exists()
 
 
+def test_close_keeps_the_closed_cycles_launches_and_removes_older_ones(tmp_path: Path) -> None:
+    """Every launch's output is kept for diagnosis; without an exit, a repository that runs a cycle a
+    week grows by every launch it ever made."""
+    repo = finished_repo(tmp_path, git=True, events=chain("cycle_initialized"))
+    _git(tmp_path, "config", "user.email", "t@e.x")
+    _git(tmp_path, "config", "user.name", "T")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "baseline")
+    state = store_mod.Store(repo).read_state()
+    assert state is not None
+    launches = tmp_path / ".rein" / "work" / "launches"
+    for cycle_id in (state.cycle_id, "two-cycles-ago"):
+        (launches / cycle_id).mkdir(parents=True)
+        (launches / cycle_id / "0001-implementer-T-001.log").write_text("said\n", encoding="utf-8")
+
+    assert cycle.main(["--name", "payment", "--repo", str(tmp_path)]) == 0
+
+    assert sorted(p.name for p in launches.iterdir()) == [state.cycle_id]
+
+
 @pytest.mark.integration
 def test_a_copy_an_older_init_left_does_not_open_the_next_cycle(tmp_path: Path) -> None:
     """#115 end to end: `init` copied plan.yaml and review.yaml aside and `cycle-close` restored the

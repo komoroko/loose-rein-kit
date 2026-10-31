@@ -169,6 +169,23 @@ def test_an_implementer_that_changes_nothing_keeps_what_it_said(
     assert handoff["last_agent"]["role"] == "implementer"
 
 
+def test_an_implementers_whole_output_is_kept_for_the_cycle_and_named_in_its_note(
+    repo: repo_mod.Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the tail survived a launch, so why a task took five rounds could not be read afterwards:
+    the reasoning that led there was in the part the loop dropped."""
+    monkeypatch.setattr(build_loop, "_run", agent(writes=False))
+
+    build(repo)
+
+    handoff = status_of(repo, "T-001")["handoff"]
+    kept = repo.root / handoff["last_agent"]["transcript"]
+    state = store_mod.Store(repo).read_state()
+    assert state is not None
+    assert kept.parent == repo.root / ".rein" / "work" / "launches" / state.cycle_id
+    assert "the agent's closing words" in kept.read_text(encoding="utf-8")
+
+
 # --- an attempt that said it could not ----------------------------------------
 
 

@@ -51,6 +51,7 @@ import argparse
 import contextlib
 import copy
 import fnmatch
+import itertools
 import json
 import logging
 import os
@@ -683,6 +684,11 @@ _HANDOFF_STEP_MAX = 64
 _HANDOFF_SUMMARY_MAX = 4000
 _HANDOFF_BRANCH_MAX = 200
 
+#: Where every agent launch's whole output is kept, one directory per cycle. The handoff keeps only
+#: the tail, and why a task took five rounds is in the part before it. Gitignored with the rest of
+#: `.rein/work/`; `cycle-close` keeps the cycle it closes, for its retrospective, and removes older ones.
+LAUNCHES = f"{dossier.RELATIVE_PATH}/launches"
+
 #: The handoff fields that describe *one* failure: which step, what it said, why no further
 #: round was spent, and the verdict an attempt stopped on before the gate. They are written as a
 #: unit — a new failure replaces all of them, and a green gate clears all of them. Merged field by
@@ -892,14 +898,17 @@ def record_bundle_split(repo: repo_mod.Repo, members: Sequence[str], *, why: str
     store_mod.retry_on_stale(once)
 
 
-def agent_launch_note(*, role: str, adapter: str, rc: int, output: str, session: str = "") -> dict[str, Any]:
+def agent_launch_note(
+    *, role: str, adapter: str, rc: int, output: str, session: str = "", transcript: str = ""
+) -> dict[str, Any]:
     """What the last agent launch actually said, shaped for `handoff.last_agent`.
 
     The loop used to throw a successful launch's output away the moment it returned, which is how
     an implementer that ended with *"bwrap: setting up uid map: Permission denied"* reached the
     operator as a task that simply changed nothing. The tail is kept rather than the whole stream:
     an agent's closing words are where it says what stopped it, and `state.yaml` has to stay
-    writable at exactly the moment it is carrying a failure.
+    writable at exactly the moment it is carrying a failure; `transcript` names where the whole
+    output is (`LAUNCHES`).
 
     A note is *carried* to the next status write rather than written on its own. A launch is not a
     state change, and this repository has no event-less write path on purpose — so an event per
@@ -911,6 +920,7 @@ def agent_launch_note(*, role: str, adapter: str, rc: int, output: str, session:
         "rc": max(-256, min(256, rc)),
         "session": session[:128],
         "output_tail": output[-_HANDOFF_SUMMARY_MAX:],
+        "transcript": transcript[:_HANDOFF_BRANCH_MAX],
         "at": event_chain.now_iso(),
     }
 
@@ -1108,6 +1118,9 @@ class Orchestrator:
         # Which gate steps went green during the attempt this thread is running. Thread-local
         # because leaves run concurrently and each is establishing evidence about its own tree.
         self._local = threading.local()
+        # Numbers this run's launches, so each one's output is kept under a name of its own.
+        self._launches = itertools.count(1)
+        self._run_started = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         # What this run put in front of a model, by role. Measured, not estimated — see
         # `spend_summary`.
         self._spent: dict[str, dict[str, int]] = {}
@@ -1381,6 +1394,7 @@ class Orchestrator:
                     rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
                 else:
                     rc, out = self._launch_contained(contained, argv, cwd=cwd, where=where, env=env)
+            transcript = self._keep_launch(out, role=role or where, task_id=task_id)
             if rc == 0:
                 try:
                     said, spent = record.read_output(out) if record else (out, usage_mod.Usage.unavailable())
@@ -1396,12 +1410,16 @@ class Orchestrator:
                     # only when someone might want it, so a caller can never read a stale one from
                     # an earlier launch on this thread. "" for a CLI that names no session.
                     self._local.session_opened = record.session_of(out) if record else ""
-                    note = agent_launch_note(role=role or where, adapter=adapter, rc=0, output=said, session=session)
+                    note = agent_launch_note(
+                        role=role or where, adapter=adapter, rc=0, output=said, session=session, transcript=transcript
+                    )
                     self._note_diagnostic(task_id, {"last_agent": note})
                     return said
             else:
                 self._spend_usage(role or where, usage_mod.Usage.unavailable())
-            note = agent_launch_note(role=role or where, adapter=adapter, rc=rc, output=out, session=session)
+            note = agent_launch_note(
+                role=role or where, adapter=adapter, rc=rc, output=out, session=session, transcript=transcript
+            )
             fault = faults.classify_launch(rc, out)
             if fault is faults.Fault.ENV_PERMANENT or faults.is_capacity(out) or not self._spend_launch_retry():
                 raised = EnvironmentFault(fault, where=where, rc=rc, output=out)
@@ -1409,6 +1427,23 @@ class Orchestrator:
                 raise raised
             _wait_out_the_machine(where, rc, attempt)
             attempt += 1
+
+    def _keep_launch(self, output: str, *, role: str, task_id: str) -> str:
+        """Write one launch's whole output under this cycle's `LAUNCHES`, before anything parses it,
+        and return where — relative to the repository — or "" in a dry run, which launches nothing.
+        A retry is another launch and gets a file of its own."""
+        if self.dry_run or not self.cycle_id:
+            return ""
+        with self._evidence_lock:
+            number = next(self._launches)
+        name = "-".join(part for part in (self._run_started, f"{number:04d}", role, task_id) if part)
+        relative = f"{LAUNCHES}/{self.cycle_id}/{re.sub(r'[^A-Za-z0-9._-]', '_', name)}.log"
+        path = self.repo.path(relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # "x": a name already taken is two launches under one name, and the second must not erase the first.
+        with path.open("x", encoding="utf-8") as kept:
+            kept.write(output)
+        return relative
 
     def _escalate(self, kind: str, message: str, *, task: str | Sequence[str] = "") -> None:
         """Record something a human has to decide about, and say so on the console.
