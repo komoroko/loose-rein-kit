@@ -239,7 +239,7 @@ Reclassify each task the impact analysis (`rein dag
 
 Tasks form a **DAG**: kind = **foundation** / **parallel** / **integration**; layers and the
 critical path derive from `blocked_by`. Consumption order, parallelism, merge, and stopping
-run **in code**, not LLM discretion (detail: build.md, tasks.md). A task's `scope` in the plan
+run **in code**, not LLM discretion (detail: tasks.md). A task's `scope` in the plan
 says where its work belongs, and the loop checks the diff against it — reaching into another
 task's territory blocks the task rather than landing.
 
@@ -357,7 +357,7 @@ a function of the tree and therefore the only one that expires without the repos
 runs on the host and nowhere else — an audit reads a published database, and the one sandbox kind
 with egress exists to carry an agent's model calls, not to produce a security answer somewhere
 nobody can see — and a machine that could not answer records nothing, because "could not ask" is
-not "the answer is bad" (detail: build.md, verify.md).
+not "the answer is bad" (detail: verify.md).
 
 ## Branch / commit / permissions
 
