@@ -1120,7 +1120,9 @@ class Orchestrator:
         self._local = threading.local()
         # Numbers this run's launches, so each one's output is kept under a name of its own.
         self._launches = itertools.count(1)
-        self._run_started = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        # Two runs can start within one second — one that refuses at once, and the next — so the
+        # run is named to the microsecond and by its process.
+        self._run_started = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S%fZ}-{os.getpid()}"
         # What this run put in front of a model, by role. Measured, not estimated — see
         # `spend_summary`.
         self._spent: dict[str, dict[str, int]] = {}
